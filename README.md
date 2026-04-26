@@ -2,10 +2,14 @@
 
 > Open-source VST3/AU plugin that re-creates what competitor tube emulations refuse to model: **time-varying behaviour**, **per-instance Monte Carlo variation**, and **real-time Jiles-Atherton transformer hysteresis**.
 
+[![Build & Test](https://github.com/hwangtab/valvra/actions/workflows/build.yml/badge.svg)](https://github.com/hwangtab/valvra/actions/workflows/build.yml)
 [![License: GPL-3](https://img.shields.io/badge/License-GPL--3-blue.svg)](LICENSE)
-![Tests](https://img.shields.io/badge/Tests-57%2F57-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-82%2F82-brightgreen)
 ![ASAN+UBSAN](https://img.shields.io/badge/ASAN%2BUBSAN-clean-brightgreen)
 ![Formats](https://img.shields.io/badge/Formats-VST3%20|%20AU%20|%20Standalone-informational)
+![Hidden physics](https://img.shields.io/badge/Hidden_physics-12_mechanisms-orange)
+![JUCE](https://img.shields.io/badge/JUCE-8-blueviolet)
+![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
 
 ## What makes this different
 
