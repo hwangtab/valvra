@@ -1,0 +1,55 @@
+# Build
+build/
+build-*/
+cmake-build-*/
+out/
+Debug/
+Release/
+*.build/
+
+# IDEs
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+CMakeLists.txt.user*
+
+# JUCE generated
+Builds/
+JuceLibraryCode/
+
+# Fetched dependencies
+_deps/
+JUCE-8*/
+chowdsp_utils-*/
+
+# Platform-specific
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test artifacts
+Testing/
+*.gcov
+*.gcda
+*.gcno
+
+# Python (measurement scripts)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local config
+local.cmake
+.env
+
+# Release artifacts (use GitHub Releases instead)
+releases/
+*.vst3
+*.component
+*.aaxplugin
+*.pkg
+*.msi

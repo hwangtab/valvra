@@ -1,0 +1,50 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS-arm64
+          - os: ubuntu-24.04
+            name: Linux-x64
+          - os: windows-2022
+            name: Windows-x64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libfreetype-dev libglu1-mesa-dev libjack-jackd2-dev
+
+      - name: Configure CMake (DSP + tests only for CI)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DVALVRA_BUILD_TESTS=ON
+          -DVALVRA_BUILD_PLUGIN=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure -C Release
