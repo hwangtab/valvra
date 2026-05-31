@@ -112,6 +112,26 @@ TEST_CASE("Oversampler 8x: works and is dependency-free", "[oversample][8x]")
     REQUIRE(peak < 2.0);  // no blowup
 }
 
+TEST_CASE("Oversampler 16x: works and is dependency-free", "[oversample][16x]")
+{
+    PolyphaseOversampler<16> os;
+    constexpr int N = 256;
+    std::vector<double> y;
+    y.reserve(N);
+    for (int n = 0; n < N; ++n)
+    {
+        const double x = std::sin(2.0 * std::numbers::pi * 0.02 * n);
+        auto up = os.upsample(x);
+        for (auto& v : up) v = std::tanh(v);
+        y.push_back(os.downsample(up));
+    }
+
+    double energy = 0.0;
+    for (double v : y)
+        energy += v * v;
+    REQUIRE(energy > 0.01);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PDC (plugin delay compensation) verification — push an impulse through an
 // up → identity → down path and confirm the peak response lands at exactly
@@ -172,6 +192,12 @@ TEST_CASE("Oversampler: reported latency matches measured group delay",
     {
         const int measured = measureImpulseLatency<8>();
         const int reported = PolyphaseOversampler<8>::latencyInBaseSamples();
+        REQUIRE(measured == reported);
+    }
+    SECTION("16x")
+    {
+        const int measured = measureImpulseLatency<16>();
+        const int reported = PolyphaseOversampler<16>::latencyInBaseSamples();
         REQUIRE(measured == reported);
     }
 }

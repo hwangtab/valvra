@@ -17,8 +17,19 @@
 
 namespace valvra {
 
+/// Mode index — must match the order in PluginProcessor's "preset"
+/// AudioParameterChoice (V72=0, ConsoleOutput=1, ...) so saved-state
+/// integers continue to map to the right chain config.  ConsoleOutput
+/// was previously labelled "Marshall" and tuned as a guitar-amp output
+/// stage; it is now a class-A1 console-style power-tube colour suitable
+/// for mix and mastering use.  Push Drive past ~2 to recover the older
+/// guitar-crunch territory.
 enum class PresetMode : int {
-    V72 = 0, Marshall = 1, CultureVulture = 2, RNDI = 3
+    V72            = 0,
+    ConsoleOutput  = 1,
+    CultureVulture = 2,
+    RNDI           = 3,
+    HiFi300B       = 4,
 };
 
 struct FactoryPreset
@@ -29,8 +40,9 @@ struct FactoryPreset
     float        drive;         ///< matches kParamDrive range [0, 3]
     float        outputDb;      ///< matches kParamOutputDb range [−24, +24]
     float        mix;           ///< [0, 1]
-    int          oversampleIdx; ///< 0=1x, 1=2x, 2=4x, 3=8x
+    int          oversampleIdx; ///< 0=1x, 1=2x, 2=4x, 3=8x, 4=16x
     std::uint64_t seed;
+    int          cvModeIdx { 1 }; ///< 0=T, 1=P1, 2=P2
 };
 
 inline const std::vector<FactoryPreset>& factoryPresets()
@@ -43,7 +55,7 @@ inline const std::vector<FactoryPreset>& factoryPresets()
         },
         {
             "Punchy Kick", "Drums",
-            PresetMode::Marshall, 1.4f, -4.0f, 0.85f, 2, 0x12340042ULL
+            PresetMode::ConsoleOutput, 1.4f, -4.0f, 0.85f, 2, 0x12340042ULL
         },
         {
             "Snare Body", "Drums",
@@ -51,7 +63,7 @@ inline const std::vector<FactoryPreset>& factoryPresets()
         },
         {
             "Room Mics Vulture", "Drums",
-            PresetMode::CultureVulture, 1.6f, -6.0f, 0.6f, 2, 0xCA11EEUL
+            PresetMode::CultureVulture, 1.6f, -6.0f, 0.6f, 2, 0xCA11EEUL, 2
         },
 
         // ── Vocals ────────────────────────────────────────────────────────
@@ -61,11 +73,11 @@ inline const std::vector<FactoryPreset>& factoryPresets()
         },
         {
             "Vocal Double", "Vocal",
-            PresetMode::CultureVulture, 0.9f, -2.0f, 0.9f, 2, 0xD081E42ULL
+            PresetMode::CultureVulture, 0.9f, -2.0f, 0.9f, 2, 0xD081E42ULL, 0
         },
         {
             "Rap Vocal Aggro", "Vocal",
-            PresetMode::Marshall, 1.5f, -5.0f, 1.0f, 2, 0xAAF19421ULL
+            PresetMode::ConsoleOutput, 2.0f, -5.0f, 1.0f, 2, 0xAAF19421ULL
         },
 
         // ── Bass / DI ─────────────────────────────────────────────────────
@@ -89,7 +101,11 @@ inline const std::vector<FactoryPreset>& factoryPresets()
         },
         {
             "Guitar Crunch", "Guitar",
-            PresetMode::Marshall, 1.8f, -3.0f, 1.0f, 3, 0x77AAEEULL
+            PresetMode::ConsoleOutput, 2.8f, -3.0f, 1.0f, 3, 0x77AAEEULL
+        },
+        {
+            "Console Master Drive", "Master",
+            PresetMode::ConsoleOutput, 0.9f, 0.0f, 0.65f, 3, 0xC0501FULL
         },
     };
     return kPresets;

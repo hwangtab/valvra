@@ -20,6 +20,7 @@
 
 #include "TubeAmpChain.h"
 #include "PolyphaseOversampler.h"
+#include "ExpansionRack.h"
 
 // Single-header WAV reader/writer (public domain / MIT-0)
 #define DR_WAV_IMPLEMENTATION
@@ -34,6 +35,9 @@
 #include <vector>
 #include <cmath>
 #include <climits>
+#include <array>
+#include <algorithm>
+#include <limits>
 
 #ifdef _WIN32
   #include <io.h>
@@ -55,6 +59,16 @@ struct CliOptions
     double      sampleRate      { 48000.0 };
     int         oversample      { 4 };
     double      warmupSec       { 0.1 };
+    std::string expansion       { "off" };
+    double      expansionAmount { 0.0 };
+    double      expansionMix    { 1.0 };
+    double      realism         { 0.0 };
+    std::string profileVersion  { "fitted_v1" };
+    double      fitDriveScale   { std::numeric_limits<double>::quiet_NaN() };
+    double      fitFeedback     { std::numeric_limits<double>::quiet_NaN() };
+    double      fitLoading      { std::numeric_limits<double>::quiet_NaN() };
+    double      fitInterstageDA { std::numeric_limits<double>::quiet_NaN() };
+    double      fitInterstageDATau { std::numeric_limits<double>::quiet_NaN() };
 };
 
 void printHelp()
@@ -66,12 +80,23 @@ void printHelp()
         "                         If omitted: reads raw float32 from stdin.\n"
         "  --output=path.wav      Write WAV file (32-bit float, matches input format).\n"
         "                         If omitted: writes raw float32 to stdout.\n"
-        "  --preset=v72|rndi|marshall|cv   Chain mode preset (default: v72)\n"
+        "  --preset=v72|rndi|marshall|cv|hifi   Chain mode preset (default: v72)\n"
         "  --transformer=marinair|utc|jensen|lundahl (default: preset default)\n"
         "  --drive=1.0             Input gain multiplier\n"
+        "  --expansion=off|opto|fet|tape|synth  Tier4+ expansion engine\n"
+        "  --expansion-amount=0..1  Expansion intensity\n"
+        "  --expansion-mix=0..1     Expansion wet/dry mix\n"
+        "  --realism=0..1           Analog surrounding-circuit realism\n"
+        "  --profile-version=legacy|fitted_v1   Per-preset profile table (default: fitted_v1)\n"
+        "  --v72-profile=legacy|fitted_v1       Backward-compatible alias of --profile-version\n"
+        "  --fit-drive-scale=X      Override drive scale (fit harness)\n"
+        "  --fit-feedback=X         Override realism feedback coeff (fit harness)\n"
+        "  --fit-loading=X          Override realism transformer loading (fit harness)\n"
+        "  --fit-da=X               Override realism interstage DA amount (fit harness)\n"
+        "  --fit-da-tau=X           Override realism interstage DA tau [s] (fit harness)\n"
         "  --seed=N                Monte Carlo seed (default 0)\n"
         "  --sr=48000              Sample rate (used only for stdin mode)\n"
-        "  --os=4                  Oversampling factor (1, 2, 4, 8)\n"
+        "  --os=4                  Oversampling factor (1, 2, 4, 8, 16)\n"
         "  --warmup-sec=0.1        Seconds of silence to prime before reading input\n");
 }
 
@@ -158,7 +183,7 @@ bool parseIntStrict(const std::string& key, const std::string& val,
 
 bool isSupportedOversample(int os) noexcept
 {
-    return os == 1 || os == 2 || os == 4 || os == 8;
+    return os == 1 || os == 2 || os == 4 || os == 8 || os == 16;
 }
 
 bool validateCommonOptions(const CliOptions& o, std::string& err)
@@ -175,7 +200,53 @@ bool validateCommonOptions(const CliOptions& o, std::string& err)
     }
     if (! isSupportedOversample(o.oversample))
     {
-        err = "--os must be one of 1, 2, 4, 8";
+        err = "--os must be one of 1, 2, 4, 8, 16";
+        return false;
+    }
+    if (! std::isfinite(o.expansionAmount)
+        || o.expansionAmount < 0.0 || o.expansionAmount > 1.0)
+    {
+        err = "--expansion-amount must be finite and within [0, 1]";
+        return false;
+    }
+    if (! std::isfinite(o.expansionMix)
+        || o.expansionMix < 0.0 || o.expansionMix > 1.0)
+    {
+        err = "--expansion-mix must be finite and within [0, 1]";
+        return false;
+    }
+    if (! std::isfinite(o.realism) || o.realism < 0.0 || o.realism > 1.0)
+    {
+        err = "--realism must be finite and within [0, 1]";
+        return false;
+    }
+    if (std::isfinite(o.fitDriveScale) && o.fitDriveScale <= 0.0)
+    {
+        err = "--fit-drive-scale must be > 0";
+        return false;
+    }
+    if (std::isfinite(o.fitFeedback)
+        && (o.fitFeedback < 0.0 || o.fitFeedback > 0.5))
+    {
+        err = "--fit-feedback must be within [0, 0.5]";
+        return false;
+    }
+    if (std::isfinite(o.fitLoading)
+        && (o.fitLoading < 0.0 || o.fitLoading > 1.0))
+    {
+        err = "--fit-loading must be within [0, 1]";
+        return false;
+    }
+    if (std::isfinite(o.fitInterstageDA)
+        && (o.fitInterstageDA < 0.0 || o.fitInterstageDA > 0.2))
+    {
+        err = "--fit-da must be within [0, 0.2]";
+        return false;
+    }
+    if (std::isfinite(o.fitInterstageDATau)
+        && (o.fitInterstageDATau < 0.05 || o.fitInterstageDATau > 2.0))
+    {
+        err = "--fit-da-tau must be within [0.05, 2.0]";
         return false;
     }
     return true;
@@ -259,6 +330,86 @@ bool parseArgs(int argc, char** argv, CliOptions& o, int& exitCode)
                 return false;
             }
         }
+        else if (key == "--expansion")
+        {
+            o.expansion = val;
+        }
+        else if (key == "--expansion-amount")
+        {
+            if (! parseDoubleStrict(key, val, o.expansionAmount, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--expansion-mix")
+        {
+            if (! parseDoubleStrict(key, val, o.expansionMix, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--realism")
+        {
+            if (! parseDoubleStrict(key, val, o.realism, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--profile-version" || key == "--v72-profile")
+        {
+            o.profileVersion = val;
+        }
+        else if (key == "--fit-drive-scale")
+        {
+            if (! parseDoubleStrict(key, val, o.fitDriveScale, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--fit-feedback")
+        {
+            if (! parseDoubleStrict(key, val, o.fitFeedback, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--fit-loading")
+        {
+            if (! parseDoubleStrict(key, val, o.fitLoading, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--fit-da")
+        {
+            if (! parseDoubleStrict(key, val, o.fitInterstageDA, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
+        else if (key == "--fit-da-tau")
+        {
+            if (! parseDoubleStrict(key, val, o.fitInterstageDATau, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                exitCode = 1;
+                return false;
+            }
+        }
         else if (key == "--seed")
         {
             if (! parseUInt64Strict(key, val, o.seed, err))
@@ -301,6 +452,12 @@ bool parseArgs(int argc, char** argv, CliOptions& o, int& exitCode)
             exitCode = 0;
             return false;
         }
+        else
+        {
+            std::fprintf(stderr, "error: unknown option '%s'\n", key.c_str());
+            exitCode = 1;
+            return false;
+        }
     }
 
     if (! validateCommonOptions(o, err))
@@ -309,7 +466,135 @@ bool parseArgs(int argc, char** argv, CliOptions& o, int& exitCode)
         exitCode = 1;
         return false;
     }
+
+    const auto isOneOf = [](const std::string& v, const auto& allowed) noexcept
+    {
+        for (const auto* a : allowed)
+            if (v == a) return true;
+        return false;
+    };
+
+    static constexpr std::array<const char*, 7> kPresets {
+        "v72", "rndi", "marshall", "cv", "vulture", "hifi", "300b"
+    };
+    if (! isOneOf(o.preset, kPresets))
+    {
+        std::fprintf(stderr,
+                     "error: --preset must be one of v72|rndi|marshall|cv|hifi\n");
+        exitCode = 1;
+        return false;
+    }
+
+    static constexpr std::array<const char*, 5> kTransformers {
+        "auto", "marinair", "utc", "jensen", "lundahl"
+    };
+    if (! isOneOf(o.transformer, kTransformers))
+    {
+        std::fprintf(stderr,
+                     "error: --transformer must be one of auto|marinair|utc|jensen|lundahl\n");
+        exitCode = 1;
+        return false;
+    }
+
+    static constexpr std::array<const char*, 7> kExpansions {
+        "off", "opto", "la2a", "fet", "1176", "tape", "synth"
+    };
+    if (! isOneOf(o.expansion, kExpansions) && o.expansion != "fx")
+    {
+        std::fprintf(stderr,
+                     "error: --expansion must be one of off|opto|fet|tape|synth\n");
+        exitCode = 1;
+        return false;
+    }
+
+    static constexpr std::array<const char*, 2> kProfileVersions {
+        "legacy", "fitted_v1"
+    };
+    if (! isOneOf(o.profileVersion, kProfileVersions))
+    {
+        std::fprintf(stderr,
+                     "error: --profile-version must be one of legacy|fitted_v1\n");
+        exitCode = 1;
+        return false;
+    }
+
     return true;
+}
+
+double modeDriveScaleForPreset(const std::string& preset) noexcept
+{
+    if (preset == "marshall") return 1.6;
+    if (preset == "cv" || preset == "vulture") return 1.9;
+    if (preset == "rndi") return 1.8;
+    if (preset == "hifi" || preset == "300b") return 1.3;
+    return 1.0; // v72
+}
+
+double mapRealismControl(double userValue) noexcept
+{
+    const double x = std::clamp(userValue, 0.0, 1.0);
+    if (x <= 0.30)
+    {
+        const double t = x / 0.30;
+        return 0.20 * t * t;
+    }
+    if (x <= 0.65)
+    {
+        const double t = (x - 0.30) / 0.35;
+        return 0.20 + 0.55 * std::pow(t, 0.85);
+    }
+    const double t = (x - 0.65) / 0.35;
+    return 0.75 + 0.25 * std::pow(t, 1.35);
+}
+
+struct CliRealismProfile
+{
+    double feedbackAmount;
+    double transformerLoading;
+    double interstageDA;
+    double interstageDATau;
+    FeedbackVoicing feedbackVoicing;
+};
+
+CliRealismProfile realismProfileForPreset(const CliOptions& o) noexcept
+{
+    const auto& preset = o.preset;
+    const bool fitted = (o.profileVersion == "fitted_v1");
+    if (preset == "marshall")
+        return fitted ? CliRealismProfile { 0.105, 0.58, 0.045, 0.38, FeedbackVoicing::Controlled }
+                      : CliRealismProfile { 0.10, 0.55, 0.040, 0.38, FeedbackVoicing::Controlled };
+    if (preset == "cv" || preset == "vulture")
+        return fitted ? CliRealismProfile { 0.035, 0.73, 0.090, 0.55, FeedbackVoicing::LowFeedback }
+                      : CliRealismProfile { 0.03, 0.70, 0.085, 0.55, FeedbackVoicing::LowFeedback };
+    if (preset == "rndi")
+        return fitted ? CliRealismProfile { 0.022, 0.44, 0.028, 0.38, FeedbackVoicing::IronDamping }
+                      : CliRealismProfile { 0.02, 0.42, 0.025, 0.38, FeedbackVoicing::IronDamping };
+    if (preset == "hifi" || preset == "300b")
+        return fitted ? CliRealismProfile { 0.145, 0.33, 0.022, 0.25, FeedbackVoicing::Controlled }
+                      : CliRealismProfile { 0.14, 0.30, 0.020, 0.25, FeedbackVoicing::Controlled };
+    return fitted ? CliRealismProfile { 0.115, 0.52, 0.060, 0.38, FeedbackVoicing::Controlled }
+                  : CliRealismProfile { 0.12, 0.48, 0.055, 0.38, FeedbackVoicing::Controlled };
+}
+
+void applyRealism(TubeAmpChainConfig& cfg, const CliOptions& o) noexcept
+{
+    const double realism = mapRealismControl(o.realism);
+    auto p = realismProfileForPreset(o);
+    if (std::isfinite(o.fitFeedback))
+        p.feedbackAmount = o.fitFeedback;
+    if (std::isfinite(o.fitLoading))
+        p.transformerLoading = o.fitLoading;
+    if (std::isfinite(o.fitInterstageDA))
+        p.interstageDA = o.fitInterstageDA;
+    if (std::isfinite(o.fitInterstageDATau))
+        p.interstageDATau = o.fitInterstageDATau;
+
+    cfg.realismAmount = realism;
+    cfg.feedbackAmount = realism * p.feedbackAmount;
+    cfg.transformerLoading = realism * p.transformerLoading;
+    cfg.interstageDAAmount = realism * p.interstageDA;
+    cfg.interstageDATau = p.interstageDATau;
+    cfg.feedbackVoicing = p.feedbackVoicing;
 }
 
 TubeAmpChainConfig buildConfig(const CliOptions& o)
@@ -317,13 +602,19 @@ TubeAmpChainConfig buildConfig(const CliOptions& o)
     TubeAmpChainConfig cfg;
     if      (o.preset == "rndi")     cfg = chain_presets::RNDIMode();
     else if (o.preset == "marshall") cfg = chain_presets::MarshallMode();
+    else if (o.preset == "hifi" || o.preset == "300b")
+                                     cfg = chain_presets::HiFi300BMode();
     else if (o.preset == "cv" ||
              o.preset == "vulture")  cfg = chain_presets::CultureVultureMode();
     else                              cfg = chain_presets::V72Preamp();
 
-    // Apply drive to all stages uniformly
+    // Apply preset-aware drive mapping to all stages uniformly.
+    const double driveScale = std::isfinite(o.fitDriveScale)
+        ? o.fitDriveScale
+        : modeDriveScaleForPreset(o.preset);
+    const double effDrive = o.drive * driveScale;
     for (int i = 0; i < cfg.numStages; ++i)
-        cfg.stages[i].inputVoltageSwing *= o.drive;
+        cfg.stages[i].inputVoltageSwing *= effDrive;
 
     // Transformer override
     auto setTrafo = [](TransformerStageConfig& t, const std::string& name){
@@ -339,6 +630,7 @@ TubeAmpChainConfig buildConfig(const CliOptions& o)
     }
 
     cfg.variationSeed = o.seed;
+    applyRealism(cfg, o);
     return cfg;
 }
 
@@ -361,11 +653,22 @@ static float processOneSampleNoOS(TubeAmpChain& chain, float inSample) noexcept
     return static_cast<float>(chain.process(static_cast<double>(inSample)));
 }
 
+static ExpansionMode parseExpansionMode(const std::string& m) noexcept
+{
+    if (m == "opto" || m == "la2a") return ExpansionMode::OptoComp;
+    if (m == "fet" || m == "1176")  return ExpansionMode::FetComp;
+    if (m == "tape")                return ExpansionMode::TapeSat;
+    if (m == "synth" || m == "fx")  return ExpansionMode::SynthFx;
+    return ExpansionMode::Off;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // stdin → stdout loop (raw float32 mono).
 // ─────────────────────────────────────────────────────────────────────────────
 template <int Factor>
-void runStdinStdoutOS(TubeAmpChain& chain, int warmupSamples)
+void runStdinStdoutOS(TubeAmpChain& chain,
+                      ExpansionRack& expansion,
+                      int warmupSamples)
 {
     PolyphaseOversampler<Factor> os;
     for (int i = 0; i < warmupSamples; ++i)
@@ -374,13 +677,17 @@ void runStdinStdoutOS(TubeAmpChain& chain, int warmupSamples)
     float inSample = 0.0f;
     while (std::fread(&inSample, sizeof(float), 1, stdin) == 1)
     {
-        const float out = processOneSampleOS(chain, os, inSample);
+        double wet = processOneSampleOS(chain, os, inSample);
+        expansion.processMono(wet, wet);
+        const float out = static_cast<float>(wet);
         std::fwrite(&out, sizeof(float), 1, stdout);
     }
     std::fflush(stdout);
 }
 
-void runStdinStdoutNoOS(TubeAmpChain& chain, int warmupSamples)
+void runStdinStdoutNoOS(TubeAmpChain& chain,
+                        ExpansionRack& expansion,
+                        int warmupSamples)
 {
     for (int i = 0; i < warmupSamples; ++i)
         (void)processOneSampleNoOS(chain, 0.0f);
@@ -388,7 +695,9 @@ void runStdinStdoutNoOS(TubeAmpChain& chain, int warmupSamples)
     float inSample = 0.0f;
     while (std::fread(&inSample, sizeof(float), 1, stdin) == 1)
     {
-        const float out = processOneSampleNoOS(chain, inSample);
+        double wet = processOneSampleNoOS(chain, inSample);
+        expansion.processMono(wet, wet);
+        const float out = static_cast<float>(wet);
         std::fwrite(&out, sizeof(float), 1, stdout);
     }
     std::fflush(stdout);
@@ -446,6 +755,14 @@ int runWavFile(const CliOptions& opts)
             opts.seed ^ (c == 0 ? 0ULL : kStereoSalt);
         chains[c].setup(cfg, internalSR);
     }
+    std::vector<ExpansionRack> expansions(ch);
+    for (auto& e : expansions)
+    {
+        e.prepare(static_cast<double>(inSR));
+        e.setMode(parseExpansionMode(opts.expansion));
+        e.setAmount(opts.expansionAmount);
+        e.setMix(opts.expansionMix);
+    }
 
     int warmup = 0;
     if (! warmupSamplesFrom(opts.warmupSec, static_cast<double>(inSR), warmup, err))
@@ -466,16 +783,24 @@ int runWavFile(const CliOptions& opts)
                 for (int i = 0; i < warmup; ++i)
                     (void)processOneSampleNoOS(ch_chain, 0.0f);
                 for (drwav_uint64 f = 0; f < readFrames; ++f)
-                    outBuf[f * ch + c] = processOneSampleNoOS(
+                {
+                    double wet = processOneSampleNoOS(
                         ch_chain, interleaved[f * ch + c]);
+                    expansions[c].processMono(wet, wet);
+                    outBuf[f * ch + c] = static_cast<float>(wet);
+                }
                 break;
             case 2: {
                 PolyphaseOversampler<2> os;
                 for (int i = 0; i < warmup; ++i)
                     (void)processOneSampleOS(ch_chain, os, 0.0f);
                 for (drwav_uint64 f = 0; f < readFrames; ++f)
-                    outBuf[f * ch + c] = processOneSampleOS(
+                {
+                    double wet = processOneSampleOS(
                         ch_chain, os, interleaved[f * ch + c]);
+                    expansions[c].processMono(wet, wet);
+                    outBuf[f * ch + c] = static_cast<float>(wet);
+                }
                 break;
             }
             case 8: {
@@ -483,8 +808,25 @@ int runWavFile(const CliOptions& opts)
                 for (int i = 0; i < warmup; ++i)
                     (void)processOneSampleOS(ch_chain, os, 0.0f);
                 for (drwav_uint64 f = 0; f < readFrames; ++f)
-                    outBuf[f * ch + c] = processOneSampleOS(
+                {
+                    double wet = processOneSampleOS(
                         ch_chain, os, interleaved[f * ch + c]);
+                    expansions[c].processMono(wet, wet);
+                    outBuf[f * ch + c] = static_cast<float>(wet);
+                }
+                break;
+            }
+            case 16: {
+                PolyphaseOversampler<16> os;
+                for (int i = 0; i < warmup; ++i)
+                    (void)processOneSampleOS(ch_chain, os, 0.0f);
+                for (drwav_uint64 f = 0; f < readFrames; ++f)
+                {
+                    double wet = processOneSampleOS(
+                        ch_chain, os, interleaved[f * ch + c]);
+                    expansions[c].processMono(wet, wet);
+                    outBuf[f * ch + c] = static_cast<float>(wet);
+                }
                 break;
             }
             case 4:
@@ -493,8 +835,12 @@ int runWavFile(const CliOptions& opts)
                 for (int i = 0; i < warmup; ++i)
                     (void)processOneSampleOS(ch_chain, os, 0.0f);
                 for (drwav_uint64 f = 0; f < readFrames; ++f)
-                    outBuf[f * ch + c] = processOneSampleOS(
+                {
+                    double wet = processOneSampleOS(
                         ch_chain, os, interleaved[f * ch + c]);
+                    expansions[c].processMono(wet, wet);
+                    outBuf[f * ch + c] = static_cast<float>(wet);
+                }
                 break;
             }
         }
@@ -539,10 +885,12 @@ int main(int argc, char** argv)
 
     // Inform the user on stderr so stdout remains pure audio
     std::fprintf(stderr,
-        "valvra_process: preset=%s drive=%.2f seed=%llu sr=%.0f os=%dx\n",
+        "valvra_process: preset=%s drive=%.2f seed=%llu sr=%.0f os=%dx exp=%s amt=%.2f mix=%.2f realism=%.2f\n",
         opts.preset.c_str(), opts.drive,
         static_cast<unsigned long long>(opts.seed),
-        opts.sampleRate, opts.oversample);
+        opts.sampleRate, opts.oversample,
+        opts.expansion.c_str(), opts.expansionAmount, opts.expansionMix,
+        opts.realism);
 
     // WAV file I/O takes precedence over stdin/stdout.
     if (! opts.inputWav.empty() && ! opts.outputWav.empty())
@@ -567,6 +915,11 @@ int main(int argc, char** argv)
     const auto cfg = buildConfig(opts);
     const double internalSR = opts.sampleRate * static_cast<double>(opts.oversample);
     chain.setup(cfg, internalSR);
+    ExpansionRack expansion;
+    expansion.prepare(opts.sampleRate);
+    expansion.setMode(parseExpansionMode(opts.expansion));
+    expansion.setAmount(opts.expansionAmount);
+    expansion.setMix(opts.expansionMix);
 
     int warmupSamples = 0;
     if (! warmupSamplesFrom(opts.warmupSec, opts.sampleRate, warmupSamples, err))
@@ -577,10 +930,11 @@ int main(int argc, char** argv)
 
     switch (opts.oversample)
     {
-        case 1: runStdinStdoutNoOS(chain, warmupSamples); break;
-        case 2: runStdinStdoutOS<2>(chain, warmupSamples); break;
-        case 4: runStdinStdoutOS<4>(chain, warmupSamples); break;
-        case 8: runStdinStdoutOS<8>(chain, warmupSamples); break;
+        case 1: runStdinStdoutNoOS(chain, expansion, warmupSamples); break;
+        case 2: runStdinStdoutOS<2>(chain, expansion, warmupSamples); break;
+        case 4: runStdinStdoutOS<4>(chain, expansion, warmupSamples); break;
+        case 8: runStdinStdoutOS<8>(chain, expansion, warmupSamples); break;
+        case 16: runStdinStdoutOS<16>(chain, expansion, warmupSamples); break;
         default:
             std::fprintf(stderr, "Unsupported oversample factor %d\n", opts.oversample);
             return 1;

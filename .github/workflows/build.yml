@@ -6,9 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "30 17 * * *" # KST 02:30 daily
 
 jobs:
   build-and-test:
+    if: github.event_name != 'schedule'
     runs-on: macos-14
     name: macOS-arm64
 
@@ -27,6 +30,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DVALVRA_BUILD_TESTS=ON
           -DVALVRA_BUILD_PLUGIN=OFF
+          -DVALVRA_ENABLE_FIT_PIPELINE_TEST=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -34,3 +38,37 @@ jobs:
       - name: Run tests
         working-directory: build
         run: ctest --output-on-failure -C Release
+
+  fit-pipeline-smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: macos-14
+    name: Fit Pipeline Smoke
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake (CLI + fit pipeline test)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DVALVRA_BUILD_TESTS=ON
+          -DVALVRA_BUILD_PLUGIN=OFF
+          -DVALVRA_ENABLE_FIT_PIPELINE_TEST=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run fit pipeline smoke
+        working-directory: build
+        run: ctest --output-on-failure -C Release -L fit_pipeline
+
+      - name: Upload fit pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fit-pipeline-artifacts
+          path: |
+            build/artifacts/external_refit_pipeline_summary_ctest.json
+            build/artifacts/fit_verify_summary_ctest.json
+            docs/32-practical-readiness-2026-05-15.md

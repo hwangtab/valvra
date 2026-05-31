@@ -81,3 +81,18 @@ or MSVC 19.34+ (VS 2022 17.4).
 
 **"libasound2-dev: could not find"** (Linux): You probably have an older
 Ubuntu. Use 22.04 LTS or newer.
+
+## Benchmarking (optional)
+
+For tracking CPU performance across patches, build with the benchmark
+target enabled:
+
+```bash
+cmake -S . -B build -DVALVRA_BUILD_BENCHES=ON
+cmake --build build --target valvra_bench -j
+./build/bench/valvra_bench
+```
+
+Output is a markdown table sorted by CPU cost descending (the heaviest
+scenario first).  See [docs/27-bench-baseline-2026-04-27.md](docs/27-bench-baseline-2026-04-27.md)
+for the current baseline, regression guidelines, and known hotspots.

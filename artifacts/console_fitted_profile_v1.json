@@ -1,0 +1,54 @@
+{
+  "version": "fitted_v1",
+  "target": "console",
+  "dataset": {
+    "path": "/Users/hwang-gyeongha/tubeamp/build/artifacts/external_ctest/console_external_capture_v1.npz",
+    "source": "external_lab_capture",
+    "mode": "console",
+    "version": "console_external_capture_v1"
+  },
+  "objective_rmse": 0.0,
+  "weights": {
+    "thd_harmonic": 0.5,
+    "fr_phase_proxy": 0.2,
+    "level_response": 0.2,
+    "transient_recovery": 0.1
+  },
+  "params": {
+    "drive_scale": 1.6,
+    "feedback_amount": 0.1,
+    "transformer_loading": 0.55,
+    "interstage_da": 0.04,
+    "interstage_da_tau": 0.38,
+    "recommended_realism": 0.31,
+    "crosstalk_db": -69.0,
+    "noise_floor_dbfs": -77.0
+  },
+  "drive_range": {
+    "min": 1.2,
+    "max": 2.1
+  },
+  "fit_metrics": {
+    "thd_curve_db": [
+      -30.575075698013432,
+      -25.620065082610225,
+      -20.997129108613258,
+      -16.409072164638523,
+      -19.748190583644433,
+      -18.62936182921776
+    ],
+    "fr_db": [
+      -9.903928677623767,
+      -2.8910452741038384,
+      -0.8456362950070968,
+      0.3017344113017302,
+      0.0,
+      -4.275523809674475,
+      -12.090736677128184,
+      -15.753062909731511
+    ],
+    "crest_db": 11.547262554236827,
+    "transient_recovery": 0.5766526415057005,
+    "noise_floor_dbfs": -71.76230298910126
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "version": "external_capture_template_v1",
+  "mode": "cv",
+  "source": "external_lab_capture",
+  "required_npz_keys": [
+    "meta_json",
+    "freq_points_hz",
+    "level_points_dbfs",
+    "thd_curve_db",
+    "h2_curve_db",
+    "h3_curve_db",
+    "h4_curve_db",
+    "fr_db",
+    "level_out_dbfs",
+    "crest_db",
+    "transient_recovery",
+    "noise_floor_dbfs"
+  ],
+  "notes": [
+    "Use LEVEL_POINTS_DBFS and FREQ_POINTS from script constants.",
+    "meta_json must include mode/source/version.",
+    "All arrays must be finite and 1D."
+  ]
+}

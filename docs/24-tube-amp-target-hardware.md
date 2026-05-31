@@ -1,10 +1,12 @@
 # 24. 진공관 앰프 타깃 하드웨어 상세
 
-> **작성일:** 2026-04-19
-> **목적:** [20 MVP v2.0](./20-mvp-scope-decision.md)의 진공관 앰프 4개 모드(Preamp / Output Stage / Line Color / DI)의 기술적 근거가 되는 실물 하드웨어를 분석. 각 하드웨어의 회로 토폴로지, 진공관 동작점, 트랜스포머 스펙을 학술 논문·엔지니어링 레퍼런스에서 수집.
+> **작성일:** 2026-04-19 · **갱신:** 2026-04-27 (use-case 정합 정정)
+> **목적:** [20 MVP v2.0](./20-mvp-scope-decision.md)의 5개 모드(V72 Preamp / Console Output / Culture Vulture / RNDI / HiFi 300B SE)의 기술적 근거가 되는 실물 하드웨어를 분석. 각 하드웨어의 회로 토폴로지, 진공관 동작점, 트랜스포머 스펙을 학술 논문·엔지니어링 레퍼런스에서 수집.
 > **연관 문서:** [01 진공관](./01-vacuum-tube-physics.md) · [14 회로 토폴로지](./14-missing-circuit-topologies.md) · [22 학술 정량 데이터](./22-academic-quantitative-data.md)
 
-> **주의:** 상표는 교육·설명 목적으로만 사용. 본 프로젝트는 Nominative Fair Use 범위 내에서 회로 **원리**를 참고하며, 제품 상표를 마케팅에 사용하지 않음 ([17번 법률](./17-legal-and-licensing.md) Option A).
+> **사용 정체:** 본 플러그인은 **믹싱 / 마스터링용 진공관 색깔 프로세서**다. 이 문서가 Marshall JCM800 / Fender Twin / Vox AC30 / Western Electric 91A 같은 하드웨어를 인용하는 것은 운영점 / 트랜스포머 / 전원부 calibration의 *물리적 출처*이며, 본 플러그인이 기타앰프 시뮬레이션이라는 뜻이 아니다. 예컨대 §B "Output Stage Mode"의 회로 분석은 그대로 살아 있지만, 실제 Valvra의 **Console Output** 모드는 같은 회로를 **class-A1 mid-rail bias**로 옮겨 mix-bus / 마스터버스 워밍에 적합하게 voicing 한다 (사용자가 Drive를 ≥ 2.5로 푸시하면 class-AB cutoff 영역으로 들어가 본문에 기술된 기타-앰프 크런치 캐릭터도 사용 가능).
+
+> **상표 주의:** 상표는 교육·설명 목적으로만 사용. 본 프로젝트는 Nominative Fair Use 범위 내에서 회로 **원리**를 참고하며, 제품 상표를 마케팅에 사용하지 않음 ([17번 법률](./17-legal-and-licensing.md) Option A). 사용자-가시 모드 라벨은 "V72 Preamp / Console Output / Culture Vulture / RNDI DI / HiFi 300B SE" 로, 회사명/제품명 직접 노출을 피한다.
 
 ---
 
@@ -90,14 +92,15 @@ ChainConfig V72_Preamp = {
 
 ---
 
-## B. Output Stage Mode — Marshall JCM800 / Fender Twin 계열
+## B. Console Output Mode — Marshall JCM800 / Fender Twin 회로 참조
 
-### B.1 역사와 의의
+> **사용자-가시 라벨:** "Console Output". 본 섹션의 JCM800 / Twin 회로는 **물리적 참조**로 인용 — DSP가 빌리는 토폴로지·트랜스포머·전원부 calibration의 출처다. 운영점 자체는 mix/master 친화로 옮겼다 (§B.5 참조).
 
-- **Marshall JCM800 2203** (1981~): 록 기타 톤의 상징. EL34 기반 100W 전력앰프
-- **Fender Twin Reverb** (1965~): 6L6GC 기반 클린 파워, 미국 Clean 사운드의 표준
-- **이 모드의 특징:** 포화(saturation) 영역을 주로 사용. 드라이브 노브로 극단까지 밀어붙이기 가능
-- 드럼 버스나 마스터 버스에서 "drive + transformer punch" 얻는 용도
+### B.1 역사와 의의 (회로 출처)
+
+- **Marshall JCM800 2203** (1981~): 록 기타 톤의 상징. EL34 기반 100W 전력앰프 — LTP phase splitter + push-pull EL34 + UTC-style OPT 의 정전형(canonical) 회로 출처.
+- **Fender Twin Reverb** (1965~): 6L6GC 기반 클린 파워, 미국 Clean 사운드의 표준.
+- **본 플러그인에서의 활용:** 이 회로의 **물리** (LTP 차동 입력, push-pull 짝수배음 상쇄, OPT 히스테리시스, B+ rail dynamics)는 그대로 시뮬레이션. 단 운영점은 mix/master 정합으로 옮김 (Vg_bias −36 V class-AB1 → −25 V class-A1, driveScale 32 → 15). 디폴트 Drive에서는 짝수배음 dominant gentle saturation (drum bus / master glue), Drive ≥ 2.5에서 회로 본연의 class-AB cutoff crunch 도달 — guitar coloration 도 사용자가 원할 때 사용 가능.
 
 ### B.2 Marshall JCM800 Power Section
 
@@ -136,34 +139,35 @@ ChainConfig V72_Preamp = {
 | THD @ 50% output | ~1% | ~0.5% |
 | THD @ clipping | 10~30% (soft saturation) | 10~25% |
 
-### B.5 Output Stage Mode 구현 (Valvra)
+### B.5 Console Output Mode 구현 (Valvra)
 
-**중요:** 스피커·cabinet 시뮬레이션은 **포함하지 않음**. 우리는 "파워관 + OPT의 색깔"만 취한다 (amp sim이 아니라 color processor).
+**중요:** 스피커·cabinet 시뮬레이션은 **포함하지 않음**. 우리는 "파워관 + OPT의 색깔"만 취한다 (amp sim이 아니라 mix/master color processor).
+
+본 플러그인의 실제 구현 (`src/dsp/TubeAmpChain.h::MarshallMode`)은 위 회로 참조의 **물리 구조**를 그대로 가져오되, 운영점만 mix/master 정합으로 이동 — bias가 class-AB1 cutoff knee 대신 class-A1 mid-rail에 앉아 디폴트 Drive에서 짝수배음 워밍이 되고, 사용자가 Drive를 푸시할수록 위 §B.4 표의 class-AB 시그니처로 자연스럽게 진입한다.
 
 ```cpp
-ChainConfig Marshall_OutputStage = {
-    .inputTransformer = TransformerType::Off,  // line level 직입
-    .stages = {
-        {
-            .tube = TubeType::TUBE_12AX7,
-            .topology = Topology::LongTailedPair,  // Phase inverter
-            .Rtail = 10000.0,
-            .Rk = 680.0,
-            .Rp_balanced = 100000.0
-        },
-        {
-            .tube = TubeType::EL34_TriodeStrap,
-            .topology = Topology::PushPullClassAB,
-            .bias = -42.0,
-            .ULtap = 0.43,  // 43% UL
-            .Vp_nominal = 470.0
-        }
+// 실제 코드의 의도 요약 (src/dsp/TubeAmpChain.h::MarshallMode 참고)
+ChainConfig ConsoleOutput = {
+    .inputTransformer = TransformerType::Off,           // line level 직입
+    .preampStages = {
+        { .tube = TUBE_12AX7, .Vg_bias = -1.6 },         // warm bias (was −1.2 cold)
+        { .tube = TUBE_12AX7, .Vg_bias = -1.8 }          // linear driver
     },
-    .outputTransformer = TransformerType::MarshallStyleOPT,  // GOSS Si-steel
-    .rectifier = RectifierType::SolidState,  // JCM800는 SS
-    .sagBehavior = SagProfile::MarshallStiff  // 덜한 sag
+    .pushPullPower = {                                   // ideal phase split + PP pair
+        .tube = EL34_TriodeStrap,
+        .Vg_bias = -25.0,                                // class-A1 mid-rail (was −36 class-AB1)
+        .driveScale_VPerUnit = 15.0,                     // gentler default (was 32)
+        .Vp_nominal = 450.0,
+        .Rk_tail = 470.0,
+        .tubeAsymmetry = 0.03                            // matched-pair "even-harmonic breath"
+    },
+    .outputTransformer = UTC_A12_Style,                  // Si-steel
+    .rectifier = SolidState,
+    .sagBehavior = SolidStateStiff                       // weak but non-zero sag
 };
 ```
+
+→ 사용자가 Drive=1.0에서 듣는 톤은 "console power-stage warmth" (drum bus / mix bus / master glue), Drive ≥ 2.5에서 듣는 톤은 §B.4의 class-AB JCM800 character. 한 회로, 두 use case.
 
 ---
 

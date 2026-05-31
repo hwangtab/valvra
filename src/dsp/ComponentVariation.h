@@ -29,6 +29,14 @@
 
 namespace valvra::dsp {
 
+enum class VariationDistribution : int
+{
+    Modern = 0,
+    Vintage = 1,
+    Worn = 2,
+    Wild = 3
+};
+
 struct ComponentVariation
 {
     uint64_t seed {0};
@@ -75,7 +83,9 @@ struct ComponentVariation
 // Generate a per-instance variation from a seed. Same seed → same variation.
 // Uses truncated-Gaussian perturbations with academically justified σ values.
 // ─────────────────────────────────────────────────────────────────────────────
-inline ComponentVariation makeVariation(uint64_t seed) noexcept
+inline ComponentVariation makeVariation(
+    uint64_t seed,
+    VariationDistribution distribution = VariationDistribution::Modern) noexcept
 {
     ComponentVariation v;
     v.seed = seed;
@@ -96,45 +106,80 @@ inline ComponentVariation makeVariation(uint64_t seed) noexcept
         return sigma * x;
     };
 
-    // Tube: σ = 8% (Dempwolf spread)
-    v.tube_G_scale     = clampedGauss(0.08);
-    v.tube_mu_scale    = clampedGauss(0.08);
-    v.tube_gamma_scale = clampedGauss(0.02);   // γ is stable
+    double tubeSigma = 0.08;
+    double passiveSigma = 1.0;
+    double transformerSigma = 1.0;
+    double hiddenSigma = 1.0;
+    double ageTilt = 1.0;
+
+    switch (distribution)
+    {
+        case VariationDistribution::Vintage:
+            tubeSigma = 0.05;
+            passiveSigma = 0.75;
+            transformerSigma = 0.80;
+            hiddenSigma = 0.80;
+            ageTilt = 0.97;
+            break;
+        case VariationDistribution::Worn:
+            tubeSigma = 0.12;
+            passiveSigma = 1.45;
+            transformerSigma = 1.20;
+            hiddenSigma = 1.55;
+            ageTilt = 0.90;
+            break;
+        case VariationDistribution::Wild:
+            tubeSigma = 0.18;
+            passiveSigma = 2.00;
+            transformerSigma = 1.70;
+            hiddenSigma = 2.20;
+            ageTilt = 0.86;
+            break;
+        case VariationDistribution::Modern:
+        default:
+            break;
+    }
+
+    // Tube: σ = 8% baseline (Dempwolf spread). Distribution presets scale
+    // the spread and ageTilt models broad gm loss on worn/wild populations.
+    v.tube_G_scale     = clampedGauss(tubeSigma) * ageTilt;
+    v.tube_mu_scale    = clampedGauss(tubeSigma);
+    v.tube_gamma_scale = clampedGauss(0.02 * hiddenSigma);   // γ is stable
 
     // Transformer: σ = 6–10%
-    v.trafo_Ms_scale = clampedGauss(0.06);
-    v.trafo_a_scale  = clampedGauss(0.10);
-    v.trafo_k_scale  = clampedGauss(0.12);
+    v.trafo_Ms_scale = clampedGauss(0.06 * transformerSigma);
+    v.trafo_a_scale  = clampedGauss(0.10 * transformerSigma);
+    v.trafo_k_scale  = clampedGauss(0.12 * transformerSigma);
 
     // Passives
-    v.Rk_scale       = clampedGauss(0.01);     // 1% resistor
-    v.Ck_scale       = clampedGauss(0.15);     // electrolytic skew high
-    v.coupling_scale = clampedGauss(0.05);     // film cap
+    v.Rk_scale       = clampedGauss(0.01 * passiveSigma);     // 1% resistor
+    v.Ck_scale       = clampedGauss(0.15 * passiveSigma);     // electrolytic skew high
+    v.coupling_scale = clampedGauss(0.05 * passiveSigma);     // film cap
 
     // PSU: reservoir caps drift, transformer DCR varies
-    v.Vb_scale      = clampedGauss(0.02);
-    v.Zsupply_scale = clampedGauss(0.08);
+    v.Vb_scale      = clampedGauss(0.02 * passiveSigma);
+    v.Zsupply_scale = clampedGauss(0.08 * passiveSigma);
 
     // ─── Hidden-physics perturbations ──────────────────────────────────
     // Tolerances chosen so two random instances sound *different* in the
     // same mechanism, but no single one blows up.  σ values are loosely
     // calibrated to docs/06 §3 (passive tolerances) and docs/03 §2/3/5/7
     // (time-varying behaviour variability).
-    v.gridLeakR_scale        = clampedGauss(0.05);
-    v.gridCouplingC_scale    = clampedGauss(0.10);   // film/electrolytic
-    v.gridVon_offset         = clampedGaussAdditive(0.08);   // ±0.24 V @3σ
-    v.heaterHum_scale        = clampedGauss(0.30);   // heater-to-cathode
+    v.gridLeakR_scale        = clampedGauss(0.05 * passiveSigma);
+    v.gridCouplingC_scale    = clampedGauss(0.10 * passiveSigma);   // film/electrolytic
+    v.gridVon_offset         = clampedGaussAdditive(0.08 * hiddenSigma);   // ±0.24 V @3σ
+    v.heaterHum_scale        = clampedGauss(0.30 * hiddenSigma);   // heater-to-cathode
                                                      // coupling is loose
-    v.soakageAmt_scale       = clampedGauss(0.25);   // aged caps drift
-    v.soakageTau_scale       = clampedGauss(0.15);
-    v.ripple_scale           = clampedGauss(0.20);   // line-voltage +
+    v.soakageAmt_scale       = clampedGauss(0.25 * hiddenSigma);   // aged caps drift
+    v.soakageTau_scale       = clampedGauss(0.15 * hiddenSigma);
+    v.ripple_scale           = clampedGauss(0.20 * hiddenSigma);   // line-voltage +
                                                      // reservoir-cap skew
-    v.thermalSens_scale      = clampedGauss(0.15);   // emission spread
-    v.slewPos_scale          = clampedGauss(0.08);   // tied to gm
-    v.slewNeg_scale          = clampedGauss(0.08);
-    v.presenceFreq_scale     = clampedGauss(0.04);   // ~640 Hz @ 3σ on
+    v.thermalSens_scale      = clampedGauss(0.15 * hiddenSigma);   // emission spread
+    v.slewPos_scale          = clampedGauss(0.08 * hiddenSigma);   // tied to gm
+    v.slewNeg_scale          = clampedGauss(0.08 * hiddenSigma);
+    v.presenceFreq_scale     = clampedGauss(0.04 * transformerSigma);   // ~640 Hz @ 3σ on
                                                      // a 16 kHz peak
-    v.presenceGain_offset_dB = clampedGaussAdditive(0.4);   // ±1.2 dB 3σ
+    v.presenceGain_offset_dB = clampedGaussAdditive(0.4 * transformerSigma);   // ±1.2 dB 3σ
 
     return v;
 }

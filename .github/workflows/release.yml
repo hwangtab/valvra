@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-macos-release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DVALVRA_BUILD_TESTS=OFF
+          -DVALVRA_BUILD_PLUGIN=ON
+          -DVALVRA_BUILD_CLI=OFF
+          -DVALVRA_BUILD_BENCHES=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package plugin artifacts
+        run: |
+          mkdir -p release
+          cp -R build/src/plugin/ValvraPlugin_artefacts/Release release/ValvraPlugin_artefacts_macos
+          cd release
+          zip -r ValvraPlugin_macos.zip ValvraPlugin_artefacts_macos
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ValvraPlugin_macos
+          path: release/ValvraPlugin_macos.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/ValvraPlugin_macos.zip
+          generate_release_notes: true

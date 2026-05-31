@@ -2,7 +2,9 @@
 
 > **제품 정체:** **Tube Amp Coloration Plugin** — 진공관 + 트랜스포머를 통과한 효과를 재현. EQ 아님. 디지털 믹스의 "차갑고 납작한" 사운드를 "살아있는 아날로그"로 변환.
 
-> **상태 (2026-04-19):** 🟢 **v3.0.0 — 진공관 앰프 방향 확정** — 25개 문서. Pultec EQ(v1.0)에서 사용자 원 요청(진공관 앰프)으로 **방향 재설정 완료**. MVP 범위 축소 금지, 센세이셔널 수준 유지. 현행 MVP 가이드: [20 MVP v2.0](./20-mvp-scope-decision.md) + [24 진공관 앰프 타깃](./24-tube-amp-target-hardware.md).
+> **상태 (2026-05-09):** 🟢 **Tier 4+ 코어 구현 완료** — Tier 3 + Expansion 엔진 코어 + 별도 Compressor/Tape 타깃까지 반영됨. 현행 MVP 가이드: [20 MVP v2.0](./20-mvp-scope-decision.md) + [24 진공관 앰프 타깃](./24-tube-amp-target-hardware.md). 실제 구현 갭 기준선: [26 구현 갭 감사](./26-implementation-gap-audit-2026-04-26.md).
+
+> **사용 정체:** 본 플러그인은 **믹싱 / 마스터링용 진공관 색깔 프로세서**다. 5개 모드 (V72 Preamp · Console Output · Culture Vulture · RNDI DI · HiFi 300B SE) 모두 mix-bus / 트랙 / 마스터 버스 워크플로 정합. 24번 문서가 *물리적 회로 참조* 로 Marshall JCM800 / Fender Twin / Vox AC30 같은 하드웨어를 인용하는 것은 운영점·트랜스포머·전원부 calibration의 출처이지, 본 플러그인의 사용 시나리오가 기타앰프 시뮬레이션이라는 뜻이 아니다.
 
 > **핵심 차별점 (시중 UAD/Waves/Softube/Slate/Soundtoys 전원 없음):** Jiles-Atherton 히스테리시스 · 캐소드 바운스 · PSU Sag · 열 드리프트 · Monte Carlo 개체차 · 실시간 B-H 루프 시각화 · Null Test 내장 · 다단 체인 빌더 · Neural Foundation Layer
 
@@ -19,7 +21,7 @@
 
 ---
 
-## 문서 맵 (25개)
+## 문서 맵 (30개)
 
 ### Part 1 — 물리·이론 기반
 - **[01 진공관 물리](./01-vacuum-tube-physics.md)** — Child-Langmuir, Koren 모델(Ex 지수 포함), 빔 사극관
@@ -32,9 +34,10 @@
 - **[06 확률적 개체차 ★★★](./06-stochastic-component-modeling.md)** — Monte Carlo, per-instance seed
 - **[07 구현 전략](./07-implementation-strategies.md)** — WDF(trapezoidal/BE 비교), DK, Neural, 수치 안정성(§7.5, 7.6)
 - **[14 회로 토폴로지 보완](./14-missing-circuit-topologies.md)** — LTP, SRPP, UL, Cascode, Phase splitter 등
+- **[30 Neural Training Playbook](./30-neural-training-playbook.md)** — Open-Amp/Wright 기반 residual 학습 경로
 
 ### Part 3 — 스코프·타깃
-- **[24 진공관 앰프 타깃 하드웨어 ★★★](./24-tube-amp-target-hardware.md)** 🟢 **현행 MVP 기준** — V72/Marshall/Culture Vulture/RNDI 4개 모드 회로 분석
+- **[24 진공관 앰프 타깃 하드웨어 ★★★](./24-tube-amp-target-hardware.md)** 🟢 **현행 MVP 기준** — 5개 모드 (V72 / Console Output / Culture Vulture / RNDI / HiFi 300B SE) 의 *물리적 회로 참조*. Console Output은 Marshall JCM800 / Fender Twin 같은 power-tube 출력단에서 운영점만 mix/master 친화로 옮긴 voicing.
 - **[11 타깃 하드웨어 카탈로그](./11-target-hardware-catalog.md)** — 일반 참조 (Neve, Pultec, Fairchild, LA-2A, 1176, Manley 등 10종)
 - **[12 진공관 너머의 비선형성](./12-analog-beyond-tubes.md)** — Opto, FET, Tape, Diode, Op-amp
 - **[13 마스터링 기능](./13-mastering-features.md)** — M/S, True Peak, Linear-phase, A/B, LUFS
@@ -47,6 +50,8 @@
 ### Part 5 — 실무·제품화
 - **[15 사용 시나리오 가이드](./15-use-case-guide.md)** — Drum/Vocal/Bass/Master 파라미터 추천
 - **[16 UI/UX 스펙](./16-ui-ux-spec.md)** — Easy/Standard/Expert 3모드, 시각화 패널
+- **[28 사용자 매뉴얼 (KO)](./28-user-manual-ko.md)** — 기능/워크플로/문제해결
+- **[29 User Manual (EN)](./29-user-manual-en.md)** — feature/workflow/troubleshooting
 
 ### Part 6 — 비즈니스·리스크
 - **[17 법적 및 라이선스](./17-legal-and-licensing.md)** — 상표, GPL 감염, JUCE 라이선스 (AGPL-3)
@@ -55,6 +60,7 @@
 ### Part 7 — 의사 결정 ★★★
 - **[20 MVP v2.0 — 센세이셔널 진공관 앰프](./20-mvp-scope-decision.md)** 🟢 **현행 MVP** — 15개 전면 차별 기능, 4개 모드, Chain Builder, Neural Layer, 범위 축소 금지 선언
 - **[23 비상업 오픈소스 리포지셔닝](./23-noncommercial-redirect.md)** — 라이선스/배포 전략 (GPL-3, $0 예산, 일정 유연)
+- **[26 구현 갭 감사](./26-implementation-gap-audit-2026-04-26.md)** 🟢 **현행 구현 기준선** — 코드가 문서상 v1.0에 얼마나 근접했는지와 다음 작업 순서
 
 ### Part 8 — 실측·학술 데이터 아카이브 ★★★
 - **[22 학술 논문 기반 정량 데이터](./22-academic-quantitative-data.md)** 🟢 **현행 기반** — Dempwolf 2011 12AX7 실측 파라미터, Ni-Permalloy JA 추정, 시변 효과 학술 수치, 공개 데이터셋 라이선스
@@ -71,7 +77,7 @@
 
 ### 믹싱 엔지니어 (기술 배경 불필요)
 1. **[20 MVP v2.0](./20-mvp-scope-decision.md)** — "어떤 플러그인인가" 한 눈에
-2. **[24 진공관 앰프 타깃](./24-tube-amp-target-hardware.md)** — 4개 모드(V72/Marshall/Culture Vulture/RNDI)
+2. **[24 진공관 앰프 타깃](./24-tube-amp-target-hardware.md)** — 5개 모드(V72 / Console Output / Culture Vulture / RNDI / HiFi 300B SE)의 회로 참조
 3. **[05 배음 & 심리음향](./05-harmonic-spectrum-and-psychoacoustics.md)** — "왜 짝수 배음이 따뜻하게 들리는가"
 4. **[08 경쟁 분석](./08-competitive-analysis.md)** — "왜 기존 플러그인이 부족한가"
 5. **[15 사용 시나리오](./15-use-case-guide.md)** — 실제 워크플로 가이드
@@ -85,7 +91,7 @@
 6. **[03 시변 비선형성](./03-time-varying-nonlinearities.md)** — 상태 변수 설계
 
 ### 프로덕트 매니저 / 창업자
-1. **[20 MVP 스코프 확정](./20-mvp-scope-decision.md)** — 현재 진행 중인 MVP 결정 기록 (Pultec EQP-1A, 12개월 일정)
+1. **[20 MVP 스코프 확정](./20-mvp-scope-decision.md)** — 현재 진행 중인 MVP 결정 기록 (진공관 앰프 v2.0 기준)
 2. **[19 리스크 분석](./19-risk-analysis.md)** — 프로젝트 전체 리스크 (P1: 시장 검증, GPL 감염, Burnout)
 3. **[17 법률 및 라이선스](./17-legal-and-licensing.md)** — JUCE AGPL-3, chowdsp 모듈별 라이선스
 4. **[11 타깃 하드웨어](./11-target-hardware-catalog.md)** — 하드웨어 선정 기준
@@ -231,8 +237,9 @@
 - **v2.3.0** (2026-04-18): **학술 논문 정량 데이터 아카이브** — [22 Academic Quantitative Data](./22-academic-quantitative-data.md) 문서 추가. 실물 측정 불가 상황을 학술 문헌으로 대체. **핵심 성과:** Dempwolf 2011 12AX7 실측 파라미터 3종 (RSD-1, RSD-2, EHX-1), μ 17% 편차 증거, Rutt 1984 grid current 실측 fit, Gyraf BOM 완전 BOM, Ni-Permalloy/Mu-metal JA 추정, Jones/Blencowe 시변 효과 정량치, NAM MIT 통합 전략. **실물 측정 없이 MVP 구현 가능한 정량 수준 도달.**
 - **v2.4.0** (2026-04-18): **비상업 오픈소스 리포지셔닝** — [23 Non-Commercial Redirect](./23-noncommercial-redirect.md) 문서 추가. 판매 포기 → GPL-3 오픈소스. **해방 효과:** 예산 $5,800 → $0, JUCE GPL-3 무료, chowdsp GPL 모듈 자유 사용, 일정 유연, 기술 범위 확장. P1 리스크 3개 → 1개(Burnout) 감소.
 - **v3.0.0** (2026-04-19): **🔥 방향 전면 재설정 — 진공관 앰프로 복귀.** 사용자 원 요청 재확인 결과 v1.0~v2.4의 "Pultec EQP-1A 이퀄라이저" 타깃이 **부적합**으로 판명. 원 요청은 "진공관 앰프 통과 효과 = 색깔·포화·드라이브". **수정 내용:** (1) [20 MVP v2.0](./20-mvp-scope-decision.md) 전면 재작성 — 센세이셔널 진공관 앰프 색깔 유닛, 15개 전면 차별 기능, 범위 축소 금지 선언, (2) [24 진공관 앰프 타깃](./24-tube-amp-target-hardware.md) 신규 — V72/Marshall/Culture Vulture/RNDI 4개 모드 회로 분석, (3) 21번·22번·23번에 방향 정정 주석 추가, 21번 ARCHIVED 표시. **핵심 차별 15종:** Jiles-Atherton 히스테리시스 + 캐소드 바운스 + PSU Sag + 열 드리프트 + Monte Carlo 개체차 + Reroll + 실시간 B-H 루프 시각화 + Harmonic meter + Null Test 버튼 + Warmup Simulation + Drift Recorder + Reroll Timeline + 1~4단 Chain Builder + 5개 토폴로지 + Neural Foundation Layer. DSP 코어 5종 (KorenTriode, JilesAtherton, CathodeBounce, PowerSupplySag, ComponentVariation) 그대로 재사용.
+- **v3.1.0** (2026-04-27): **모드 정합성 패치.** (1) 4개 → **5개 모드**: HiFi 300B SE (audiophile mastering 전용, 6SN7 → 6SN7 follower → 300B SE → Lundahl OPT) 추가. (2) **Marshall → Console Output 리튠**: 본 플러그인은 mix / mastering용이지 기타앰프 시뮬레이션이 아님이 확인됨. LTP+PP+EL34 회로(Newton-Raphson tail solver, EL34 triode-strap Dempwolf 모델, UTC OPT)는 **DSP 그대로 유지**, 운영점만 class-AB1 cutoff knee → class-A1 mid-rail로 이동 (Vg_bias −36 → −25 V, driveScale 32 → 15). 결과: default Drive=1.0에서 mix-friendly 짝수배음 워밍, Drive ≥ 2.5에서 class-AB로 진입해 기타 크런치 캐릭터도 그대로 사용 가능. UI 라벨 "Marshall" → "Console Output". `PresetMode` 정수 인덱스(1)는 유지 → 저장된 호스트 state 100% 호환. (3) 분석적 gm 솔버 최적화 (`KorenTriode::evalWithDerivatives()`)로 PushPull / SRPP / Cascode 솔버의 plateCurrent 호출 6→2회. Console Output CPU 51% → 38% (-25%). (4) `bench/valvra_bench` 회귀 측정 인프라 추가 ([docs/27](./27-bench-baseline-2026-04-27.md)).
 
 ---
 
-*최종 업데이트: 2026-04-19*  
-*문서 버전: 3.0.0 (진공관 앰프 방향 확정, 센세이셔널 수준 유지)*
+*최종 업데이트: 2026-04-27*
+*문서 버전: 3.1.0 (5개 모드 + Console Output 리튠, mix/master use case 정합)*

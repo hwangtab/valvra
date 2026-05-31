@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// HarmonicAnalyzer — rolling FFT that extracts H1..H7 from the processed
+// HarmonicAnalyzer — rolling FFT that extracts H2..H7 from the processed
 // signal. Feeds the harmonic meter UI and the null-test diagnostics.
 //
 // Designed for low CPU: one 2048-point FFT every ~50 ms on a dedicated
@@ -20,8 +20,8 @@ namespace valvra {
 struct HarmonicSnapshot
 {
     float fundamentalDb { -100.0f };
-    std::array<float, 7> harmonicsDbc {
-        -100.0f, -100.0f, -100.0f, -100.0f, -100.0f, -100.0f, -100.0f
+    std::array<float, 6> harmonicsDbc {
+        -100.0f, -100.0f, -100.0f, -100.0f, -100.0f, -100.0f
     };
     float fundamentalHz { 0.0f };
     bool  valid { false };
@@ -111,7 +111,7 @@ public:
         const float fundAmp = fundMag > 1e-12f ? fundMag : 1e-12f;
         snap.fundamentalDb = 20.0f * std::log10(fundAmp + 1e-12f);
 
-        for (int h = 2; h <= 8; ++h)
+        for (int h = 2; h <= 7; ++h)
         {
             const int hb = fundBin * h;
             if (hb >= kFftSize / 2) break;

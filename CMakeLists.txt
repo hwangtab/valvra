@@ -28,21 +28,19 @@ option(VALVRA_BUILD_PLUGIN   "Build VST3/AU/Standalone plugin" ON)
 option(VALVRA_BUILD_CLI      "Build valvra_process CLI for validation" ON)
 option(VALVRA_BUILD_BENCHES  "Build micro-benchmarks"          OFF)
 option(VALVRA_USE_CHOWDSP    "Fetch chowdsp_utils (needed for plugin, optional for core DSP)" ${VALVRA_BUILD_PLUGIN})
+option(VALVRA_USE_RTNEURAL   "Enable RTNeural runtime model loading" OFF)
+option(VALVRA_ENABLE_FIT_PIPELINE_TEST
+       "Enable external refit pipeline smoke test in CTest"
+       ON)
 
 # Release flags
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Denormal flushing + vectorization (docs/07 §7.5)
-if(MSVC)
-    add_compile_options(/W4 /fp:fast /arch:AVX2)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -ffast-math)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-        add_compile_options(-mavx2 -mfma)
-    endif()
-endif()
+# Warning and optimization flags are target-scoped below. Keep this file from
+# adding global compile options so third-party JUCE/Catch sources don't inherit
+# project warning policy.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dependencies (fetched at configure time — no manual clone required)
@@ -70,6 +68,19 @@ if(VALVRA_USE_CHOWDSP)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(chowdsp_utils)
+endif()
+
+# RTNeural — optional neural inference backend (BSD-3).
+if(VALVRA_USE_RTNEURAL)
+    # Prefer STL backend for minimal dependency footprint in this repo.
+    set(RTNEURAL_STL ON CACHE BOOL "Use RTNeural STL backend" FORCE)
+    FetchContent_Declare(
+        RTNeural
+        GIT_REPOSITORY https://github.com/jatinchowdhury18/RTNeural.git
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(RTNeural)
 endif()
 
 # Catch2 — unit tests (BSL-1.0)
@@ -111,6 +122,14 @@ if(VALVRA_BUILD_TESTS)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Benchmarks (off by default — compile/run only when explicitly requested,
+# since they pull in JUCE just to instrument the plugin's hot path).
+# ─────────────────────────────────────────────────────────────────────────────
+if(VALVRA_BUILD_BENCHES)
+    add_subdirectory(bench)
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 message(STATUS "")
@@ -120,4 +139,5 @@ message(STATUS "  Build type:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Build plugin:   ${VALVRA_BUILD_PLUGIN}")
 message(STATUS "  Build tests:    ${VALVRA_BUILD_TESTS}")
 message(STATUS "  Build benches:  ${VALVRA_BUILD_BENCHES}")
+message(STATUS "  Use RTNeural:   ${VALVRA_USE_RTNEURAL}")
 message(STATUS "")

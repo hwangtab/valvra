@@ -1,0 +1,26 @@
+{
+  "modes": [
+    {
+      "mode": "v72",
+      "passed": true
+    },
+    {
+      "mode": "console",
+      "passed": true
+    },
+    {
+      "mode": "cv",
+      "passed": true
+    },
+    {
+      "mode": "rndi",
+      "passed": true
+    },
+    {
+      "mode": "hifi",
+      "passed": true
+    }
+  ],
+  "failures": 0,
+  "passed": true
+}

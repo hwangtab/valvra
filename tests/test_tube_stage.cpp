@@ -215,6 +215,96 @@ TEST_CASE("TubeStage: cultureVultureInput preset produces asymmetric output",
         REQUIRE(std::isfinite(v));
 }
 
+TEST_CASE("TubeStage: Culture Vulture T/P1/P2 core voicings are distinct",
+          "[TubeStage][presets][culture-vulture]")
+{
+    auto measurePeak = [](CultureVultureVoicing voicing)
+    {
+        TubeStage stage;
+        auto cfg = presets::cvDistortionCore(voicing);
+        cfg.enableWarmup = false;
+        stage.setup(cfg, kSampleRate);
+        for (int i = 0; i < 5000; ++i)
+            (void) stage.process(0.0, cfg.Vp_nominal);
+        return processSine(stage, 440.0, 0.6, 0.1, cfg.Vp_nominal);
+    };
+
+    const double triode = measurePeak(CultureVultureVoicing::Triode);
+    const double p1     = measurePeak(CultureVultureVoicing::PentodeLow);
+    const double p2     = measurePeak(CultureVultureVoicing::PentodeHigh);
+
+    REQUIRE(std::isfinite(triode));
+    REQUIRE(std::isfinite(p1));
+    REQUIRE(std::isfinite(p2));
+    REQUIRE(triode > 0.0);
+    REQUIRE(p1 > 0.0);
+    REQUIRE(p2 > 0.0);
+    REQUIRE(std::abs(triode - p1) > 0.01);
+    REQUIRE(std::abs(p2 - p1) > 0.01);
+}
+
+TEST_CASE("TubeStage: pentode screen node droops under heavy drive",
+          "[TubeStage][pentode][culture-vulture]")
+{
+    TubeStage stage;
+    auto cfg = presets::cvDistortionCore(CultureVultureVoicing::PentodeHigh);
+    cfg.enableWarmup = false;
+    stage.setup(cfg, kSampleRate);
+
+    const double screenAtRest = stage.lastScreenVoltage();
+    for (int i = 0; i < 48000; ++i)
+    {
+        const double x = 0.9 * std::sin(2.0 * std::numbers::pi * 220.0
+                                      * (static_cast<double>(i) / kSampleRate));
+        (void) stage.process(x, cfg.Vp_nominal);
+    }
+
+    const double screenDriven = stage.lastScreenVoltage();
+    REQUIRE(std::isfinite(screenAtRest));
+    REQUIRE(std::isfinite(screenDriven));
+    REQUIRE(screenDriven < screenAtRest);
+    REQUIRE(stage.lastScreenCurrent() > 0.0);
+}
+
+TEST_CASE("TubeStage: Long-Tailed Pair mismatch changes differential output",
+          "[TubeStage][ltp]")
+{
+    auto renderMeanAbs = [](double mismatch)
+    {
+        TubeStage stage;
+        auto cfg = presets::v72Stage1();
+        cfg.topology = TubeTopology::LongTailedPair;
+        cfg.enableWarmup = false;
+        cfg.enableMillerFilter = false;
+        cfg.enableSlewLimit = false;
+        cfg.enableCathodeBounce = false;
+        cfg.ltpTailR = 56.0e3;
+        cfg.ltpPlateRRatio = 1.05;
+        cfg.ltpTubeMismatch = mismatch;
+        cfg.ltpCommonModeLeak = 0.05;
+        stage.setup(cfg, kSampleRate);
+
+        for (int i = 0; i < 6000; ++i)
+            (void) stage.process(0.0, cfg.Vp_nominal);
+
+        std::vector<double> out;
+        processSine(stage, 440.0, 0.45, 0.15, cfg.Vp_nominal, &out);
+        double s = 0.0;
+        for (double v : out)
+        {
+            REQUIRE(std::isfinite(v));
+            s += std::abs(v);
+        }
+        return s / std::max<std::size_t>(1, out.size());
+    };
+
+    const double balanced = renderMeanAbs(0.0);
+    const double skewed   = renderMeanAbs(0.12);
+    REQUIRE(balanced > 1.0e-4);
+    REQUIRE(skewed > 1.0e-4);
+    REQUIRE(std::abs(skewed - balanced) > 1.0e-4);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Grid conduction / blocking distortion — pushing the grid positive should
 // charge the input coupling capacitor through the g-k diode, leaving a
@@ -224,16 +314,26 @@ TEST_CASE("TubeStage: cultureVultureInput preset produces asymmetric output",
 TEST_CASE("TubeStage: grid conduction leaves a post-burst recovery tail",
           "[stage][grid-conduction][blocking-distortion]")
 {
-    auto cfg = presets::marshallStage2();
-    cfg.enableWarmup = false;
-    // This test isolates grid-conduction blocking behavior. Keep cathode
-    // bounce enabled locally so fixed-bias preset intent changes do not
-    // couple into this assertion.
-    cfg.enableCathodeBounce = true;
+    // Use a deliberately hot config so the input signal drives the grid
+    // past the turn-on voltage and grid conduction actually activates.
+    // We don't depend on a particular preset's hot-drive choice here —
+    // the feature being tested (blocking distortion) is independent of
+    // any specific signature mode's voicing decisions.
+    TubeStageConfig cfg {
+        .tube = params::kRSD_2,
+        .topology = TubeTopology::CommonCathode,
+        .Vg_bias = -1.5, .Vp_nominal = 320.0,
+        .Rp = 100.0e3, .Rk = 1500.0, .Ck = 22.0e-6,
+        .enableCathodeBounce = true,
+        .inputVoltageSwing = 3.0,        // hot enough to push grid past 0 V
+        .outputGainLinear = 1.0,
+        .enableWarmup = false,
+        .enableMillerFilter = true,
+        .Cgp_miller = 2.4e-12,
+        .sourceImpedance = 100.0e3
+    };
     cfg.enableGridConduction = true;
-    // Make the coupling cap smaller so the effect develops in a few ms
-    // (fits the test duration).  Real guitar amp Marshall input is around
-    // 22 nF / 1 MΩ → τ_discharge ≈ 22 ms — still measurable at 48 kHz.
+    // τ_discharge ≈ 22 ms at 22 nF / 1 MΩ — still measurable at 48 kHz.
     cfg.gridCouplingC = 22.0e-9;
     cfg.gridLeakR     = 1.0e6;
 
@@ -338,13 +438,23 @@ TEST_CASE("TubeStage: grid conduction leaves a post-burst recovery tail",
 TEST_CASE("TubeStage: sustained loud signal drags bias negative (thermal drift)",
           "[stage][thermal-drift]")
 {
-    // Pick a hard-driven preset so the average |Ip| actually climbs well
-    // above resting — in a lightly-driven Class-A stage the rectified
-    // current barely moves, which would let the test pass or fail on
-    // round-off noise.  Marshall stage 2 pushes the tube into asymmetric
-    // conduction where thermal drift is physically most pronounced.
-    auto cfg = presets::marshallStage2();
-    cfg.enableWarmup         = false;
+    // Build a deliberately hot config so the average |Ip| actually
+    // climbs well above resting — in a lightly-driven Class-A stage
+    // the rectified current barely moves, which would let the test
+    // pass or fail on round-off noise.  We don't piggyback on the
+    // ConsoleOutput preset stages here because their voicing is
+    // intentionally gentle (mix-friendly) and would defeat the test.
+    TubeStageConfig cfg {
+        .tube = params::kRSD_2,
+        .topology = TubeTopology::CommonCathode,
+        .Vg_bias = -1.5, .Vp_nominal = 320.0,
+        .Rp = 100.0e3, .Rk = 1500.0, .Ck = 22.0e-6,
+        .inputVoltageSwing = 3.0,
+        .outputGainLinear = 1.0,
+        .enableWarmup = false,
+        .enableMillerFilter = false,
+        .sourceImpedance = 100.0e3
+    };
     cfg.enableHeaterHum      = false;
     cfg.enableGridConduction = false;
     cfg.enableThermalDrift   = true;
@@ -512,8 +622,23 @@ TEST_CASE("TubeStage: fresh setup does not momentarily brighten HF "
 TEST_CASE("TubeStage: microphonic coupling adds resonance-band modulation",
           "[stage][microphonics]")
 {
-    auto cfg = presets::marshallStage1();
-    cfg.enableWarmup         = false;
+    // Build a config with microphonics explicitly enabled.  The default
+    // mode-preset stages no longer turn microphonics on (Console Output
+    // is for mix/master, where chassis vibration is irrelevant), so we
+    // construct a dedicated test config — this isolates the FEATURE
+    // being tested from any preset's voicing decisions.
+    TubeStageConfig cfg {
+        .tube = params::kRSD_1,
+        .topology = TubeTopology::CommonCathode,
+        .Vg_bias = -1.2, .Vp_nominal = 320.0,
+        .Rp = 100.0e3, .Rk = 820.0, .Ck = 1.0e-6,
+        .inputVoltageSwing = 0.3,
+        .outputGainLinear = 1.0,
+        .enableWarmup = false,
+        .enableMillerFilter = true,
+        .Cgp_miller = 2.4e-12,
+        .sourceImpedance = 10.0e3
+    };
     cfg.enableHeaterHum      = false;
     cfg.enableThermalDrift   = false;
     cfg.enableGridConduction = false;

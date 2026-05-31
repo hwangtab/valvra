@@ -1,0 +1,38 @@
+{
+  "dataset_dir": "/Users/hwang-gyeongha/tubeamp/artifacts/external",
+  "pattern": "{mode}_external_capture_v1.npz",
+  "modes": "v72,console,cv,rndi,hifi",
+  "fit": {
+    "coarse_trials": 0,
+    "max_nfev": 1,
+    "hill_iters": 0,
+    "seed": 20260516
+  },
+  "verify": {
+    "modes": [
+      {
+        "mode": "v72",
+        "passed": true
+      },
+      {
+        "mode": "console",
+        "passed": true
+      },
+      {
+        "mode": "cv",
+        "passed": true
+      },
+      {
+        "mode": "rndi",
+        "passed": true
+      },
+      {
+        "mode": "hifi",
+        "passed": true
+      }
+    ],
+    "failures": 0,
+    "passed": true
+  },
+  "report": "/Users/hwang-gyeongha/tubeamp/docs/32-practical-readiness-2026-05-15.md"
+}

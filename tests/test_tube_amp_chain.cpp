@@ -57,7 +57,72 @@ double rms(const std::vector<double>& v)
     for (double x : v) s += x * x;
     return std::sqrt(s / static_cast<double>(v.size()));
 }
+
+double goertzelMag(const std::vector<double>& x, double freq, double sr)
+{
+    const double w = 2.0 * std::numbers::pi * freq / sr;
+    const double cosw = std::cos(w);
+    const double coeff = 2.0 * cosw;
+    double s_prev = 0.0, s_prev2 = 0.0;
+    for (double v : x)
+    {
+        const double s = v + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev  = s;
+    }
+    const double real = s_prev - s_prev2 * cosw;
+    const double imag = s_prev2 * std::sin(w);
+    return 2.0 * std::sqrt(real * real + imag * imag) / x.size();
+}
+
 } // namespace
+
+TEST_CASE("HiFi 300B preset renders finite, non-trivial output",
+          "[chain][hifi]")
+{
+    // Smoke test: the new HiFi 300B preset (5th mode) must build, settle
+    // its DC tracker, and produce sensible output for a moderate input
+    // signal.  We don't pin the exact harmonic profile here — the
+    // operating point of a 6SN7 → 6SN7 CF → 300B SE chain depends
+    // sensitively on every Rp / Rk / outputGainLinear, and over-tight
+    // assertions become brittle on small future calibration tweaks.
+    // The character validation is done qualitatively via listening; the
+    // automated test only catches gross breakage (NaN / silence / blow-up).
+    auto cfg = chain_presets::HiFi300BMode();
+
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+    chain.setExternalPSUMode(false);
+
+    // Settle the chain — long DC-tracker tau means we need ~250 ms of
+    // silence before measuring steady-state.
+    for (int n = 0; n < 12000; ++n) (void) chain.process(0.0);
+
+    std::vector<double> out;
+    renderSine(chain, 220.0, 0.4, 0.5, out);
+
+    for (double v : out) REQUIRE(std::isfinite(v));
+
+    const int settleN = 4096;
+    double s = 0.0;
+    int count = 0;
+    for (std::size_t i = settleN; i < out.size(); ++i)
+    {
+        s += out[i] * out[i];
+        ++count;
+    }
+    const double rmsOut = std::sqrt(s / std::max(count, 1));
+    INFO("HiFi 300B output RMS = " << rmsOut);
+    REQUIRE(rmsOut > 1.0e-4);    // chain is alive, not silent
+    REQUIRE(rmsOut < 1.0);        // chain is bounded, not exploding
+
+    // Fundamental at 220 Hz must be present in non-trivial amount —
+    // confirms the chain is doing something useful, not just emitting noise.
+    std::vector<double> tail(out.begin() + settleN, out.end());
+    const double h1 = goertzelMag(tail, 220.0, kSampleRate);
+    INFO("HiFi 300B  h1 (220 Hz) = " << h1);
+    REQUIRE(h1 > 1.0e-5);
+}
 
 TEST_CASE("TubeAmpChain: V72 preset builds and runs without error",
           "[chain][preset]")
@@ -239,7 +304,7 @@ TEST_CASE("TubeAmpChain: reroll changes output character", "[chain][reroll]")
     renderSine(chain, 1000.0, 0.1, 0.1, outBefore);
 
     // Reroll to a very different seed
-    chain.setVariationSeed(999999);
+    chain.setVariationSeed(999999, false);
 
     // Warm up again after reroll
     for (int i = 0; i < 10000; ++i) chain.process(0.0);
@@ -253,6 +318,74 @@ TEST_CASE("TubeAmpChain: reroll changes output character", "[chain][reroll]")
         diff = std::max(diff, std::abs(outBefore[i] - outAfter[i]));
 
     REQUIRE(diff > 1e-5);  // reroll produced non-trivial change
+}
+
+TEST_CASE("TubeAmpChain: reroll reapplies full Monte Carlo state",
+          "[chain][variation][reroll]")
+{
+    auto cfgA = chain_presets::V72Preamp();
+    cfgA.variationSeed = 111;
+
+    TubeAmpChain rerolled;
+    rerolled.setup(cfgA, kSampleRate);
+    rerolled.setVariationSeed(222, false);
+
+    auto cfgB = chain_presets::V72Preamp();
+    cfgB.variationSeed = 222;
+    TubeAmpChain fresh;
+    fresh.setup(cfgB, kSampleRate);
+
+    // If reroll fully reapplies the Monte Carlo state, it should be
+    // bit-equivalent to constructing a fresh chain with the same seed:
+    // same tube/passive perturbations, PSU, transformer state, heater phase,
+    // and shot-noise streams.
+    constexpr int N = 1024;
+    for (int n = 0; n < N; ++n)
+    {
+        const double a = rerolled.process(0.0);
+        const double b = fresh.process(0.0);
+        REQUIRE(a == Approx(b).margin(1.0e-12));
+    }
+}
+
+TEST_CASE("TubeAmpChain: click-free reroll avoids hard output jump",
+          "[chain][reroll][click-free]")
+{
+    auto cfg = chain_presets::V72Preamp();
+    cfg.variationSeed = 3456;
+    cfg.enablePSUSag = false;        // isolate reroll transition
+    cfg.useInputTransformer = false; // isolate reroll transition
+    cfg.useOutputTransformer = false;
+
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+
+    // Settle to steady state first.
+    for (int i = 0; i < 12000; ++i)
+        chain.process(0.0);
+
+    constexpr int N = 3000;
+    std::vector<double> out(static_cast<std::size_t>(N), 0.0);
+    for (int n = 0; n < N; ++n)
+    {
+        if (n == 1500)
+            chain.setVariationSeed(987654321ULL, true);
+        out[static_cast<std::size_t>(n)] = chain.process(0.16);
+    }
+
+    // Compare sample-to-sample step around reroll against pre-reroll
+    // baseline. Click-free reroll should not create an impulse-like jump.
+    double baselineMaxStep = 0.0;
+    for (int n = 64; n < 1400; ++n)
+        baselineMaxStep = std::max(
+            baselineMaxStep,
+            std::abs(out[static_cast<std::size_t>(n)]
+                   - out[static_cast<std::size_t>(n - 1)]));
+
+    const double stepAtReroll = std::abs(out[1500] - out[1499]);
+    INFO("baseline max step = " << baselineMaxStep
+         << ", reroll step = " << stepAtReroll);
+    REQUIRE(stepAtReroll < baselineMaxStep * 4.0 + 1.0e-6);
 }
 
 TEST_CASE("TubeAmpChain: Marshall preset runs and saturates",
@@ -283,23 +416,52 @@ TEST_CASE("TubeAmpChain: Marshall preset keeps PSU sag enabled",
     chain.setup(cfg, kSampleRate);
 
     for (int i = 0; i < 5000; ++i) chain.process(0.0);
-    const double sagQuiet = chain.currentSagPercent();
 
-    std::vector<double> out;
-    renderSine(chain, 110.0, 0.9, 1.0, out);
-    const double sagLoud = chain.currentSagPercent();
+    auto meanSagForTone = [&](double amp, int samples)
+    {
+        double acc = 0.0;
+        for (int n = 0; n < samples; ++n)
+        {
+            const double t = static_cast<double>(n) / kSampleRate;
+            const double x = amp * std::sin(2.0 * std::numbers::pi * 110.0 * t);
+            chain.process(x);
+            acc += chain.currentSagPercent();
+        }
+        return acc / static_cast<double>(samples);
+    };
 
-    // Solid-state rectifier sag is weak, but it must still be non-zero and
-    // increase under sustained loud drive.
-    REQUIRE(sagLoud > sagQuiet + 1e-6);
+    // Average over long windows so ripple phase does not dominate the
+    // instantaneous reading.
+    const double sagQuiet = meanSagForTone(0.05, static_cast<int>(kSampleRate * 0.6));
+    const double sagLoud  = meanSagForTone(0.90, static_cast<int>(kSampleRate * 0.8));
+
+    // Solid-state rectifier sag is weak but should increase on average
+    // under sustained heavy load.
+    INFO("quiet mean sag = " << sagQuiet << ", loud mean sag = " << sagLoud);
+    REQUIRE(sagLoud > sagQuiet + 1.0e-5);
 }
 
-TEST_CASE("TubeAmpChain: Marshall preset disables cathode bounce on all stages",
-          "[chain][preset][marshall][intent]")
+TEST_CASE("TubeAmpChain: Console Output preset uses class-A1 push-pull power stage",
+          "[chain][preset][console-output][intent]")
 {
+    // Console Output (mode index 1, formerly "Marshall") is now tuned for
+    // mix/master use: cathode bounce ON for slow envelope dynamics, and
+    // the push-pull pair biased at Vg = −25 V (class-A1 mid-rail) rather
+    // than the −36 V class-AB1 cutoff knee that the older guitar-amp
+    // voicing used.  Pushing Drive past ~2 still walks the pair into
+    // class-AB territory for users who want the British crunch on tap.
     const auto cfg = chain_presets::MarshallMode();
-    REQUIRE(cfg.stages[0].enableCathodeBounce == false);
-    REQUIRE(cfg.stages[1].enableCathodeBounce == false);
+    REQUIRE(cfg.stages[0].enableCathodeBounce == true);
+    REQUIRE(cfg.stages[1].enableCathodeBounce == true);
+    REQUIRE(cfg.usePushPullOutputStage == true);
+    // Class-A1 bias: well above the cutoff knee.  The exact value is a
+    // tuning parameter; we only assert the operating-point intent
+    // (between −20 V and −30 V puts both tubes squarely conducting).
+    REQUIRE(cfg.pushPullConfig.Vg_bias > -30.0);
+    REQUIRE(cfg.pushPullConfig.Vg_bias < -20.0);
+    // driveScale is gentler than the old guitar-amp value so default
+    // Drive=1.0 keeps the pair in class-A1.
+    REQUIRE(cfg.pushPullConfig.driveScale < 25.0);
 }
 
 TEST_CASE("TubeAmpChain: RNDI preset disables cathode bounce on stage 2",
@@ -326,6 +488,38 @@ TEST_CASE("TubeAmpChain: CultureVulture preset 3-stage runs",
     REQUIRE(out.size() > 0);
     for (double y : out) REQUIRE(std::isfinite(y));
     REQUIRE(rms(out) > 0.0);
+}
+
+TEST_CASE("TubeAmpChain: CultureVulture T/P1/P2 modes configure the 6AS6 core",
+          "[chain][preset][vulture]")
+{
+    const auto triode = chain_presets::CultureVultureMode(
+        CultureVultureVoicing::Triode);
+    const auto p1 = chain_presets::CultureVultureMode(
+        CultureVultureVoicing::PentodeLow);
+    const auto p2 = chain_presets::CultureVultureMode(
+        CultureVultureVoicing::PentodeHigh);
+
+    REQUIRE(triode.numStages == 3);
+    REQUIRE(p1.numStages == 3);
+    REQUIRE(p2.numStages == 3);
+    REQUIRE(triode.cultureVoicing == CultureVultureVoicing::Triode);
+    REQUIRE(p1.cultureVoicing == CultureVultureVoicing::PentodeLow);
+    REQUIRE(p2.cultureVoicing == CultureVultureVoicing::PentodeHigh);
+
+    const auto& tCore  = triode.stages[1];
+    const auto& p1Core = p1.stages[1];
+    const auto& p2Core = p2.stages[1];
+    REQUIRE(tCore.enablePentodeModel);
+    REQUIRE(p1Core.enablePentodeModel);
+    REQUIRE(p2Core.enablePentodeModel);
+    REQUIRE(tCore.pentodeTriodeStrap);
+    REQUIRE(!p1Core.pentodeTriodeStrap);
+    REQUIRE(!p2Core.pentodeTriodeStrap);
+    REQUIRE(tCore.suppressorDriveMix < p1Core.suppressorDriveMix);
+    REQUIRE(p1Core.suppressorDriveMix < p2Core.suppressorDriveMix);
+    REQUIRE(tCore.inputVoltageSwing < p1Core.inputVoltageSwing);
+    REQUIRE(p1Core.inputVoltageSwing < p2Core.inputVoltageSwing);
 }
 
 TEST_CASE("TubeAmpChain: recovers from NaN input without permanent state poison",

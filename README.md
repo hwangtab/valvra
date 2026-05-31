@@ -4,7 +4,7 @@
 
 [![Build & Test](https://github.com/hwangtab/valvra/actions/workflows/build.yml/badge.svg)](https://github.com/hwangtab/valvra/actions/workflows/build.yml)
 [![License: GPL-3](https://img.shields.io/badge/License-GPL--3-blue.svg)](LICENSE)
-![Tests](https://img.shields.io/badge/Tests-82%2F82-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-162%2F162-brightgreen)
 ![ASAN+UBSAN](https://img.shields.io/badge/ASAN%2BUBSAN-clean-brightgreen)
 ![Formats](https://img.shields.io/badge/Formats-VST3%20|%20AU%20|%20Standalone-informational)
 ![Hidden physics](https://img.shields.io/badge/Hidden_physics-12_mechanisms-orange)
@@ -29,20 +29,35 @@ Valvra implements every one of those dimensions:
 
 Plus:
 
-- **4 signature modes** — V72 Preamp · Marshall Output Stage · Culture Vulture · RNDI DI
+- **5 signature modes** — V72 Preamp · Console Output · Culture Vulture · RNDI DI · HiFi 300B SE — all calibrated for mix / mastering workflows. Console Output borrows the JCM800-class push-pull EL34 + UTC OPT physics but is biased squarely in class-A1 (gentle even-harmonic warming at the default Drive); pushing Drive past ~2 walks it into class-AB territory if you want guitar-amp coloration on tap.
 - **Live visualisations** — real-time B–H hysteresis loop + harmonic meter (H₂–H₈)
 - **Null-test button** — A/B hear exactly what the plugin adds
 - **Reroll** — new Monte Carlo seed, live, click-free
 
 ## Status
 
-**Tier 2 (feature-complete, pre-release).** The DSP engine is stable and validated: 57 unit tests, ASAN + UBSAN clean, cross-validated against academic references. Plugin works in Logic, Reaper, Ableton tested environments.
+**Tier 4+ core implemented.** The DSP engine is stable and validated, the
+plugin builds as VST3/AU/Standalone, and expansion cores plus dedicated
+Compressor/Tape targets are integrated.
 
-- [x] Research: 24 documents, 13,000+ lines ([docs/](docs/))
+- [x] Research: 25 documents, 13,000+ lines ([docs/](docs/))
 - [x] Tier 0 — core DSP: Koren + Jiles-Atherton + oversampling
-- [x] Tier 1 — integration: TubeStage, TubeAmpChain, 4 presets
-- [x] Tier 2 — plugin: VST3/AU/Standalone, signature UI, parameter smoothing
-- [ ] Tier 3 — polish: linear-phase option, PDC, factory preset bank
+- [x] Tier 1 — integration: TubeStage, TubeAmpChain, signature presets
+- [x] Tier 2 — VST3/AU/Standalone, chain builder, per-stage editing, B-H view, harmonic meter, null test, reroll timeline, warmup/drift UI
+- [x] Tier 3 — M/S routing, true-peak safety modes, TPDF dither, loudness-matched snapshot A/B compare (A/B+C/D/E, 32-step undo/redo), GR meter, Monte Carlo Lock/distribution presets, 16x oversampling, Culture Vulture T/P1/P2 modes, Neural layer
+- [x] Tier 4+ core — expansion engines (Opto/FET/Tape/SynthFX) + dedicated `ValvraCompressorPlugin` / `ValvraTapePlugin` packaging
+
+Current validation baseline:
+
+- `ctest`: 162/162 passing
+- `scripts/audit_checks.py`: passing
+- `scripts/validate_harmonics.py`: passing
+- `scripts/preset_harmonic_report.py`: passing
+
+Known remaining gaps versus the full document ambition:
+
+- Some release-gate items in the docs are operational (DAW field validation,
+  user feedback milestones, publish KPIs) rather than code implementation.
 
 ## Install
 
@@ -97,7 +112,7 @@ First configure pulls JUCE 8 via FetchContent (~50 s one-time).
 ### Regression
 
 ```bash
-(cd build && ctest)                            # 57 unit tests
+(cd build && ctest)                            # 162 tests
 python scripts/audit_checks.py                 # thread-safety + Monte Carlo
 python scripts/validate_harmonics.py           # FFT harmonic validation
 python scripts/preset_harmonic_report.py       # per-preset tone report
@@ -119,7 +134,7 @@ python generate.py | ./valvra_process --preset=v72 > out.raw
 ```
 
 Presets: `v72` · `rndi` · `marshall` · `cv` (Culture Vulture)  
-Oversample: `1` · `2` · `4` · `8`
+Oversample: `1` · `2` · `4` · `8` · `16`
 
 ## Licence
 

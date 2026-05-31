@@ -60,6 +60,35 @@ TEST_CASE("Population μ spread approximates target σ", "[variation][statistics
     REQUIRE(std < 0.12);   // < 12%
 }
 
+TEST_CASE("Distribution presets widen Monte Carlo spread predictably",
+          "[variation][distribution]")
+{
+    constexpr int N = 1000;
+    auto measureStd = [](VariationDistribution d)
+    {
+        double sum = 0.0;
+        double sumSq = 0.0;
+        for (int i = 0; i < N; ++i)
+        {
+            const auto v = makeVariation(
+                static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL, d);
+            sum += v.tube_mu_scale;
+            sumSq += v.tube_mu_scale * v.tube_mu_scale;
+        }
+        const double mean = sum / N;
+        return std::sqrt(sumSq / N - mean * mean);
+    };
+
+    const double vintage = measureStd(VariationDistribution::Vintage);
+    const double modern  = measureStd(VariationDistribution::Modern);
+    const double worn    = measureStd(VariationDistribution::Worn);
+    const double wild    = measureStd(VariationDistribution::Wild);
+
+    REQUIRE(vintage < modern);
+    REQUIRE(modern < worn);
+    REQUIRE(worn < wild);
+}
+
 TEST_CASE("Applied variation changes Koren params", "[variation][integration]")
 {
     const auto base = params::kRSD_1;
