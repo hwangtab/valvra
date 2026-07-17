@@ -67,9 +67,58 @@ struct TubeStageConfig
     double Vg_bias     { -1.5 };     ///< Grid DC bias [V] (negative class-A)
     double Vp_nominal  {  250.0 };   ///< Plate DC voltage at rest [V]
     double Rp          {  100.0e3 }; ///< Plate load resistor [Ω]
+
+    // Transformer-coupled plate (SE output stages): the OPT primary is an
+    // inductor, so the DC point sits only DCR·Ip below the rail while
+    // signal excursions ride the Rp (reflected) AC load line through it —
+    // the plate can even swing ABOVE the rail on the cutoff half.
+    bool   plateLoadIsTransformer { false };
+    double plateLoadDcr           { 60.0 };  ///< OPT primary DCR [Ω]
+
+    // ─── Reactive reflected load (docs/34 §2.5, docs/04 §6.2) ───────────
+    // A real SE output stage's reflected load is a LOUDSPEAKER, not a
+    // resistor: the motional resonance (tens of Hz) multiplies |Z| several
+    // fold and the voice-coil inductance lifts it again toward HF, so the
+    // load line opens into a frequency-dependent ellipse — clipping
+    // asymmetry becomes a function of frequency, the signature of an SE
+    // amp on a speaker.  Modelled as the reflected network
+    //   Z(s) = Rp·[1 + s/ω_vc] + Rm ∥ sLm ∥ 1/(sCm)
+    // (series voice-coil R+L plus the parallel motional RLC), discretised
+    // trapezoidally into a one-port companion: the plate Newton sees a
+    // per-sample Thevenin (R_tot, V_hist) — same solve, exact reactance.
+    // Only used on the transformer-loaded CC path; mid-band |Z| ≈ Rp keeps
+    // the level calibration anchored.
+    bool   plateLoadReactive { false };
+    double loadResonanceHz   { 45.0 };   ///< motional resonance f₀
+    double loadResonanceQ    { 1.2 };    ///< motional Q
+    double loadPeakRatio     { 5.0 };    ///< Z(f₀) ≈ Rp·(1 + ratio−1)
+    double loadVcCornerHz    { 2000.0 }; ///< voice-coil L corner (ωL = Rp)
+
+    // ─── Next-stage grid-leak AC loading (docs/34 §3.8) ─────────────────
+    // The following stage's grid-leak resistor hangs on this plate through
+    // the coupling cap: DC sees only Rp, but SIGNAL sees Rp ∥ Rg — with a
+    // 1 MΩ leak on a 100 kΩ plate that is a real ~9% gain and curvature
+    // change the isolated-stage model missed.  The chain sets this to its
+    // interstage Rg for every stage that feeds another stage (0 = none;
+    // applies to the triode CC path — the topology every interstage
+    // hand-off uses).  Level is preserved by outputMakeup_ as usual.
+    double nextStageLoadR { 0.0 };
     double Rk          {  1500.0 };  ///< Cathode resistor [Ω]
     double Ck          {  25.0e-6 }; ///< Cathode bypass capacitor [F]
     bool   enableCathodeBounce { true }; ///< Slow cathode-bypass memory on/off
+
+    // ─── Voltage-native interface (docs/34 §4.1) ────────────────────────
+    // When set by the chain, this stage's input is already GRID VOLTS
+    // (voltageNativeInput — the ×inputVoltageSwing map is skipped) and/or
+    // its output is the plate AC in VOLTS around the STATIC rest point
+    // (voltageNativeOutput — makeup/normalizer/outputGain become the
+    // chain-side inter-stage pad, and the 0.5 Hz DC tracker no longer
+    // eats the output: slow operating-point motion (sag, thermal) rides
+    // through the interstage coupling cap to the next grid, exactly as
+    // the real circuit pumps its bias).  Both default off = legacy
+    // normalized hand-off, bit-compatible.
+    bool voltageNativeInput  { false };
+    bool voltageNativeOutput { false };
 
     // Input scaling — maps audio sample (±1.0) to grid voltage swing [V].
     // Typical preamps: 0.1 V peak input → grid swings ±0.1V around bias.
@@ -161,6 +210,16 @@ struct TubeStageConfig
     double thermalBiasSensitivity  { 150.0 };   ///< V/A of bias shift per
                                                 ///  1 A of sustained Ip
 
+    // ─── Plate-node stray capacitance (docs/04 §7, physical basis) ──────
+    // The plate node sees wiring stray + Cak + the NEXT stage's reflected
+    // Miller capacitance.  Together with the operating-point-dependent
+    // output impedance (Rp ∥ rp) it forms the REAL asymmetric slew limit:
+    // while the tube conducts, rp is low and the node moves fast; as the
+    // tube swings toward cutoff rp → ∞ and the node can only charge
+    // through Rp — slow RC pull-up.  Solved implicitly inside the plate
+    // load-line Newton so it costs nothing extra.
+    double Cplate { 60.0e-12 };
+
     // ─── Asymmetric slew-rate limit (docs/04 §7) ────────────────────────
     // A real tube stage's output node has finite stray/Miller capacitance,
     // driven by the tube's plate current through the plate-load resistor.
@@ -176,7 +235,12 @@ struct TubeStageConfig
     // internal sample rate.  The defaults are deliberately conservative
     // so light material isn't affected, but fast transients pick up a
     // musical round-off that matches real hardware oscilloscope traces.
-    bool   enableSlewLimit         { true };
+    // Default OFF since the implicit plate-node solve (Cplate above) now
+    // produces the physical slew asymmetry; this block remains as an
+    // optional stylised override.  Note the legacy default rates were far
+    // below real tube-stage slew (V/µs scale) and acted as a heavy HF
+    // limiter — anyone re-enabling should prefer the physical values.
+    bool   enableSlewLimit         { false };
     // Common-cathode physics: upward plate excursions (output rising)
     // happen through the plate-load resistor charging the stray cap —
     // slow RC pull-up.  Downward excursions use the low ON-state tube
@@ -184,6 +248,17 @@ struct TubeStageConfig
     double slewRatePositive        { 1500.0 };  ///< Rising (slow, RC)
     double slewRateNegative        { 4000.0 };  ///< Falling (fast, tube
                                                 ///  conducting)
+
+    // ─── Miller feedthrough zero (docs/34 §3.5) ─────────────────────────
+    // The Miller LPF models the input POLE of the Cgp feedback; the same
+    // capacitor also feeds the plate signal FORWARD into the grid node.
+    // In the linear regime that feedthrough is already embodied in the
+    // pole, so only the NONLINEAR residual is injected here: when the
+    // plate stops following the drive (clipping), the Miller feedback
+    // collapses and the residual plate edge couples through Cgp·Zsrc —
+    // the glassy "spit" on hard-clipped edges that a pure input pole
+    // cannot produce.  Zero effect on small signals by construction.
+    bool   enableMillerFeedthrough { true };
 
     // ─── Cathode-cap dielectric absorption (matches CathodeBounceParams)
     // Exposed at stage level so Monte Carlo can perturb DA per-instance.
@@ -208,6 +283,15 @@ struct TubeStageConfig
     double shotNoiseScale  { 1.0e-5 };  ///< Conservative default (well
                                         ///  below perceptual threshold
                                         ///  at rest; scales with program)
+
+    // 1/f flicker noise weight relative to the white shot-noise floor.
+    // Cathode-interface resistance fluctuations give real tubes a pink
+    // LF noise slope (corner ~ 1 kHz) — the floor "breathes" instead of
+    // hissing uniformly.  0 = legacy pure-white.  Kept moderate: the
+    // pink component's slow RMS wander is the audible point, but past
+    // ~0.4 the quiet modes' noise floor pumps more than real DI/HiFi
+    // hardware measures (feel-verify micro-motion gate ≤ 0.9).
+    double flickerNoiseRatio { 0.35 };
 
     // ─── Microphonic coupling (docs/03 §10) ─────────────────────────────
     // A real tube has internal grid + plate elements held in place by
@@ -357,14 +441,67 @@ public:
         {
             solvePentodeRestPoint(cfg.Vp_nominal);
         }
-        else
+        else if (cfg.topology == TubeTopology::CathodeFollower)
         {
-            Ip_rest_ = triode_.plateCurrent(cfg.Vp_nominal, cfg.Vg_bias);
-            Vk_rest_ = Ip_rest_ * cfg.Rk;
-            Vp_rest_ = cfg.Vp_nominal - Ip_rest_ * cfg.Rp;
+            // Cathode follower rest point: the plate sits at the rail, the
+            // cathode rides at Ip·Rk.  Convention: cfg.Vg_bias is the
+            // RESTING Vgk (matches the legacy presets), so only the
+            // plate-cathode voltage needs the self-consistent solve:
+            //   Ip = Ip(Vb − Vk, Vg_bias),  Vk = Ip·Rk
+            double Vk = 0.0;
+            for (int it = 0; it < 32; ++it)
+            {
+                const double Ip = std::max(
+                    0.0, triode_.plateCurrent(
+                             std::max(1.0, cfg.Vp_nominal - Vk),
+                             cfg.Vg_bias));
+                const double VkNew = Ip * cfg.Rk;
+                Vk = 0.5 * Vk + 0.5 * VkNew;
+                if (! std::isfinite(Vk)) { Vk = 0.0; break; }
+            }
+            Vk_rest_ = Vk;
+            Ip_rest_ = (cfg.Rk > 1.0e-9) ? Vk / cfg.Rk
+                       : std::max(0.0, triode_.plateCurrent(cfg.Vp_nominal,
+                                                            cfg.Vg_bias));
+            Vp_rest_ = cfg.Vp_nominal;
+            cfVkLast_ = Vk_rest_;
             screenNodeV_ = cfg.screenSupplyVolts;
             lastScreenCurrent_ = 0.0;
         }
+        else
+        {
+            // Common-cathode rest point WITH the plate load line.  The
+            // legacy code evaluated Ip at Vp = B+ (no plate feedback),
+            // which both misplaced the operating point and removed the
+            // rp ∥ Rp gain compression — the deepest "static waveshaper"
+            // error this engine had.  Solve  Vp = Vb − R_dc·Ip(Vp, Vg_bias)
+            // by Newton (the residual is smooth and monotone in Vp).
+            // For a transformer-coupled plate the DC drop is only the
+            // winding DCR; the reflected Rp shapes AC excursions only.
+            const double rDc = cfg.plateLoadIsTransformer
+                ? std::max(cfg.plateLoadDcr, 0.0)
+                : cfg.Rp;
+            double Vp = cfg.plateLoadIsTransformer
+                ? cfg.Vp_nominal * 0.95
+                : cfg.Vp_nominal * 0.6;
+            for (int it = 0; it < 32; ++it)
+            {
+                const auto d = triode_.evalWithDerivatives(Vp, cfg.Vg_bias);
+                const double f  = Vp - cfg.Vp_nominal + rDc * d.Ip;
+                const double fp = 1.0 + rDc * d.rpInv;
+                Vp -= f / fp;
+                if (! std::isfinite(Vp)) { Vp = cfg.Vp_nominal * 0.6; break; }
+                Vp = std::clamp(Vp, 1.0, cfg.Vp_nominal);
+            }
+            Ip_rest_ = std::max(0.0,
+                                triode_.plateCurrent(Vp, cfg.Vg_bias));
+            Vk_rest_ = Ip_rest_ * cfg.Rk;
+            Vp_rest_ = Vp;
+            screenNodeV_ = cfg.screenSupplyVolts;
+            lastScreenCurrent_ = 0.0;
+        }
+        VpLast_ = Vp_rest_;
+        VaLast_ = std::max(0.0, Vp_rest_ - Vk_rest_);
 
         if (cfg.topology == TubeTopology::SRPP
             || cfg.topology == TubeTopology::Cascode)
@@ -406,11 +543,6 @@ public:
         }
         else if (cfg.topology == TubeTopology::LongTailedPair)
         {
-            auto at = [](const KorenTriode& triode, double Vp, double Vgk)
-            {
-                return triode.evalWithDerivatives(Vp, Vgk);
-            };
-
             // Build static mismatched pair around the stage's base triode.
             const double mm = std::clamp(cfg.ltpTubeMismatch, -0.45, 0.45);
             const double rpRatio = std::max(0.2, cfg.ltpPlateRRatio);
@@ -423,31 +555,230 @@ public:
             ltpTriodePos_.setParams(tubeP);
             ltpTriodeNeg_.setParams(tubeN);
 
+            // Joint rest solve with per-side plate load lines: each side
+            // satisfies Vp = Vb − Rp_side·Ip(Vp, Vg − Vk), and the tail
+            // carries the summed current.
+            auto restPlate = [&](const KorenTriode& tube, double Vgk,
+                                 double Rp)
+            {
+                double Vp = cfg.Vp_nominal * 0.7;
+                KorenTriode::IpDerivatives d {};
+                for (int it = 0; it < 16; ++it)
+                {
+                    d = tube.evalWithDerivatives(Vp, Vgk);
+                    const double f  = Vp - cfg.Vp_nominal + Rp * d.Ip;
+                    const double fp = 1.0 + Rp * d.rpInv;
+                    Vp -= f / fp;
+                    if (! std::isfinite(Vp)) { Vp = cfg.Vp_nominal * 0.7; break; }
+                    Vp = std::clamp(Vp, 1.0, cfg.Vp_nominal);
+                }
+                d = tube.evalWithDerivatives(Vp, Vgk);
+                return std::pair<double, KorenTriode::IpDerivatives>{ Vp, d };
+            };
+
+            const double RpPos = cfg.Rp;
+            const double RpNeg = cfg.Rp * rpRatio;
             double Vk = std::max(0.0, Vk_rest_);
+            double VpPos = cfg.Vp_nominal * 0.7;
+            double VpNeg = cfg.Vp_nominal * 0.7;
+            KorenTriode::IpDerivatives p {}, n {};
             for (int it = 0; it < 24; ++it)
             {
-                const auto p = at(ltpTriodePos_, cfg.Vp_nominal, cfg.Vg_bias - Vk);
-                const auto n = at(ltpTriodeNeg_, cfg.Vp_nominal, cfg.Vg_bias - Vk);
-                const double f = p.Ip + n.Ip - Vk / std::max(cfg.ltpTailR, 1.0);
-                const double fp = -(p.gm + n.gm) - 1.0 / std::max(cfg.ltpTailR, 1.0);
+                auto [vpP, dP] = restPlate(ltpTriodePos_, cfg.Vg_bias - Vk, RpPos);
+                auto [vpN, dN] = restPlate(ltpTriodeNeg_, cfg.Vg_bias - Vk, RpNeg);
+                VpPos = vpP; VpNeg = vpN; p = dP; n = dN;
+                const double tailR = std::max(cfg.ltpTailR, 1.0);
+                const double f = p.Ip + n.Ip - Vk / tailR;
+                const double gmP = p.gm / (1.0 + RpPos * p.rpInv);
+                const double gmN = n.gm / (1.0 + RpNeg * n.rpInv);
+                const double fp = -(gmP + gmN) - 1.0 / tailR;
                 if (std::abs(fp) < 1.0e-15) break;
                 Vk -= f / fp;
                 if (! std::isfinite(Vk)) { Vk = 0.0; break; }
                 Vk = std::max(0.0, Vk);
             }
 
-            const auto p = at(ltpTriodePos_, cfg.Vp_nominal, cfg.Vg_bias - Vk);
-            const auto n = at(ltpTriodeNeg_, cfg.Vp_nominal, cfg.Vg_bias - Vk);
-            const double VpPos = cfg.Vp_nominal - p.Ip * cfg.Rp;
-            const double VpNeg = cfg.Vp_nominal - n.Ip * cfg.Rp * rpRatio;
-
             Vk_rest_ = Vk;
             Ip_rest_ = 0.5 * (p.Ip + n.Ip);
             Vp_rest_ = 0.5 * (VpPos + VpNeg);
             ltpVkLast_ = Vk;
+            ltpVpPosLast_ = VpPos;
+            ltpVpNegLast_ = VpNeg;
+            ltpVpPosRest_ = VpPos;
+            ltpVpNegRest_ = VpNeg;
+            outputMakeup_ = 1.0
+                + cfg.Rp * std::max(0.0, 0.5 * (p.rpInv + n.rpInv));
             ltpOutRest_ = 0.5 * (VpNeg - VpPos)
                         + std::clamp(cfg.ltpCommonModeLeak, 0.0, 1.0)
                         * (0.5 * (VpPos + VpNeg) - Vp_rest_);
+        }
+
+        // Gain-calibration makeup for the plate load line: the physical
+        // small-signal gain is the legacy gm·Rp divided by (1 + Rp·rpInv).
+        // Multiplying the normalized output by that factor keeps every
+        // preset's level calibration intact while the load line reshapes
+        // curvature, asymmetry and dynamic headroom.
+        if (cfg.topology == TubeTopology::CommonCathode)
+        {
+            if (cfg.enablePentodeModel)
+            {
+                const double Va  = std::max(2.0, Vp_rest_ - Vk_rest_);
+                const double Vg1 = cfg.Vg_bias - Vk_rest_;
+                const double Vg3 = cfg.suppressorTieToCathode
+                    ? 0.0 : (cfg.suppressorBiasVolts - Vk_rest_);
+                constexpr double h = 1.0;
+                const double vg2Hi = cfg.pentodeTriodeStrap ? Va + h : screenNodeV_;
+                const double vg2Lo = cfg.pentodeTriodeStrap ? Va - h : screenNodeV_;
+                const double i1 = pentode_.evaluate(Va + h, Vg1, vg2Hi, Vg3).Ip;
+                const double i0 = pentode_.evaluate(Va - h, Vg1, vg2Lo, Vg3).Ip;
+                const double g  = std::max(0.0, (i1 - i0) / (2.0 * h));
+                outputMakeup_ = 1.0 + cfg.Rp * g;
+            }
+            else
+            {
+                // Full legacy-gain restoration: the physical rest point
+                // sits at the loaded Vp (lower gm) and the load line adds
+                // the rp ∥ Rp (∥ next-stage Rg) divider.  Ratio of the
+                // legacy small-signal gain (gm at the unloaded B+ point
+                // × Rp) to the new one keeps every downstream calibration
+                // unchanged.
+                const auto dNew = triode_.evalWithDerivatives(
+                    std::max(1.0, Vp_rest_), cfg.Vg_bias);
+                double avNew;
+                if (cfg.plateLoadIsTransformer)
+                {
+                    const double rAcTotal =
+                        cfg.Rp + std::max(cfg.plateLoadDcr, 0.0);
+                    avNew = dNew.gm * cfg.Rp
+                        / (1.0 + rAcTotal * std::max(0.0, dNew.rpInv));
+                }
+                else
+                {
+                    // Signal load = Rp ∥ Rg_next (docs/34 §3.8).
+                    const double rAcEff = (cfg.nextStageLoadR > 1.0)
+                        ? cfg.Rp * cfg.nextStageLoadR
+                          / (cfg.Rp + cfg.nextStageLoadR)
+                        : cfg.Rp;
+                    avNew = dNew.gm * rAcEff
+                        / (1.0 + rAcEff * std::max(0.0, dNew.rpInv));
+                }
+                const auto dLeg = triode_.evalWithDerivatives(
+                    cfg.Vp_nominal, cfg.Vg_bias);
+                const double avLegacy = dLeg.gm * cfg.Rp;
+                outputMakeup_ = avLegacy / std::max(avNew, 1.0e-6);
+            }
+        }
+        else if (cfg.topology != TubeTopology::LongTailedPair)
+        {
+            outputMakeup_ = 1.0;   // CF / SRPP / Cascode already node-solved
+        }
+        if (! std::isfinite(outputMakeup_)
+            || outputMakeup_ < 1.0 || outputMakeup_ > 100.0)
+            outputMakeup_ = 1.0;
+
+        // SE-OPT magnetizing-coupling constants (docs/34 §2.2).  Only the
+        // transformer-loaded triode CC path (the 300B SE output) sources
+        // its OPT's magnetizing current.  seMagToAmps_ converts the OPT's
+        // normalized drop to primary amperes (minus sign: primary
+        // volt-seconds are Vb − Vp, the inverse of the stage's plate-
+        // referenced output).  seMagZRest_ is the rest-point node impedance
+        // rp ∥ (Rp+DCR) used to de-embed the LINEAR share of the response
+        // so the OPT's own calibrated drop is not double-counted — only
+        // the tube's nonlinear failure to supply the iron passes through.
+        // Reactive-load companion constants (docs/34 §2.5, trapezoidal).
+        // Series: Re(=Rp, mid-band reflected) + Le (voice-coil corner);
+        // parallel motional RLC from (f₀, Q, peak ratio).  All reduce to a
+        // per-sample one-port Thevenin (lrRtot_, history EMF).
+        loadReactive_ = cfg.plateLoadIsTransformer && cfg.plateLoadReactive
+            && cfg.topology == TubeTopology::CommonCathode
+            && ! cfg.enablePentodeModel;
+        lrEL_ = lrJC_ = lrJLm_ = 0.0;
+        if (loadReactive_)
+        {
+            const double beta = 2.0 * sampleRate;
+            const double w0 = 2.0 * M_PI * std::max(cfg.loadResonanceHz, 1.0);
+            const double q  = std::max(cfg.loadResonanceQ, 0.1);
+            const double Le = cfg.Rp
+                / (2.0 * M_PI * std::max(cfg.loadVcCornerHz, 10.0));
+            const double Rm = std::max(cfg.loadPeakRatio - 1.0, 0.1) * cfg.Rp;
+            const double Lm = Rm / (w0 * q);
+            const double Cm = q / (w0 * Rm);
+            lrBLe_    = beta * Le;
+            lrBCm_    = beta * Cm;
+            lrInvBLm_ = 1.0 / (beta * Lm);
+            lrGm_     = 1.0 / Rm + lrBCm_ + lrInvBLm_;
+            lrRtot_   = cfg.Rp + lrBLe_ + 1.0 / lrGm_;
+        }
+
+        seMagToAmps_ = 0.0;
+        seMagZRest_  = 0.0;
+        seMagLastA_  = 0.0;
+        extMagDropNorm_ = 0.0;
+        if (cfg.plateLoadIsTransformer
+            && cfg.topology == TubeTopology::CommonCathode
+            && ! cfg.enablePentodeModel)
+        {
+            const auto dSe = triode_.evalWithDerivatives(
+                std::max(1.0, Vp_rest_), cfg.Vg_bias);
+            const double rTotSe = cfg.Rp + std::max(cfg.plateLoadDcr, 0.0);
+            seMagZRest_ = 1.0 / (std::max(0.0, dSe.rpInv)
+                                 + 1.0 / std::max(rTotSe, 1.0));
+            seMagToAmps_ = -cfg.Vp_nominal
+                / (std::max(cfg.outputGainLinear, 1.0e-6)
+                   * outputMakeup_ * std::max(cfg.Rp, 1.0));
+        }
+
+        // Resting small-signal gain for the Miller model and the dynamic
+        // output impedance handed to the next stage.  The effective AC
+        // plate load includes the next stage's grid leak (docs/34 §3.8).
+        {
+            rAcEff_ = std::max(cfg.Rp, 1.0);
+            if (! cfg.plateLoadIsTransformer && cfg.nextStageLoadR > 1.0
+                && cfg.topology == TubeTopology::CommonCathode)
+                rAcEff_ = cfg.Rp * cfg.nextStageLoadR
+                        / (cfg.Rp + cfg.nextStageLoadR);
+            const auto d = triode_.evalWithDerivatives(
+                std::max(1.0, Vp_rest_), cfg.Vg_bias);
+            lastGmLoaded_    = std::max(0.0, d.gm);
+            lastRpInvLoaded_ = std::max(0.0, d.rpInv);
+            avRest_ = lastGmLoaded_ * rAcEff_
+                    / (1.0 + rAcEff_ * lastRpInvLoaded_);
+            avSmooth_ = avRest_;
+            avAlpha_  = 1.0 - std::exp(-1.0 / (0.0007 * sampleRate));
+        }
+        dynamicSourceZ_ = 0.0;
+
+        // 0.5 Hz output-DC tracker, sample-rate independent.
+        dcLeakAlpha_ = std::exp(-2.0 * M_PI * 0.5 / sampleRate);
+
+        // Hoisted per-sample constants for the pentode path.
+        {
+            const double Rs = std::max(cfg.screenResistorOhms, 1.0);
+            const double Cs = std::max(cfg.screenBypassFarads, 1.0e-12);
+            screenAlpha_  = std::exp(-1.0 / (Rs * Cs * sampleRate));
+            invVpNominal_ = 1.0 / std::max(cfg.Vp_nominal, 1.0);
+        }
+        pinkB0_ = pinkB1_ = pinkB2_ = 0.0;
+
+        // New node-solver warm-start states.
+        VpPrev_   = VpLast_;
+        cfVkLast_ = Vk_rest_;
+        cfVkPrev_ = Vk_rest_;
+
+        // Grid-conduction network equilibrium at rest.  With the same
+        // branch ratios used in process() (fastToSlowR = 7·R_leak,
+        // slowBleedR = 18·R_leak):  slow = fast·18/25, and KCL at the
+        // fast node gives fast = Ig_rest·R_leak / (1 + (1−18/25)/7).
+        {
+            const double IgRest = std::max(0.0,
+                triode_.gridCurrent(cfg.Vg_bias + cfg.gridTurnOnVoltage));
+            const double rLeak = std::max(cfg.gridLeakR, 1.0e3);
+            const double slowShare = 18.0 / 25.0;
+            const double fastRest = IgRest * rLeak
+                                  / (1.0 + (1.0 - slowShare) / 7.0);
+            gridChargeFastV_ = fastRest;
+            gridChargeSlowV_ = slowShare * fastRest;
+            gridChargeRestV_ = gridChargeFastV_ + gridChargeSlowV_;
         }
 
         // Prime cathode bypass to its resting DC so the first sample does
@@ -465,11 +796,19 @@ public:
         lastIp_ = Ip_rest_;
         gmRest_ = computeRestingGm();
 
-        // Zero transient state
+        // Zero transient state.  NOTE: the grid-conduction branches are
+        // deliberately NOT zeroed here — they were just primed to their
+        // standing equilibrium above (lines ~647-657).  The chain rebuilds
+        // through setup() on every load / reroll / per-stage edit (it does
+        // not call reset()), so zeroing them here would re-inject the
+        // 22 ms blocking-recovery startup transient on every such event.
         millerState_ = 0.0;
         slewState_   = 0.0;
-        gridChargeFastV_ = 0.0;
-        gridChargeSlowV_ = 0.0;
+        ftVpPrev_  = Vp_rest_;
+        ftVpPrev2_ = Vp_rest_;
+        ftVgPrev_  = 0.0;
+        ftVgPrev2_ = 0.0;
+        lrEL_ = lrJC_ = lrJLm_ = 0.0;
         outputDC_    = restingOutputDC();
     }
 
@@ -480,8 +819,10 @@ public:
         bounce_.primeTo(Vk_rest_);
         warmupCurrent_ = (coldStart && config_.enableWarmup) ? 0.85 : 1.0;
         millerState_   = 0.0;
-        gridChargeFastV_ = 0.0;
-        gridChargeSlowV_ = 0.0;
+        // Re-prime the grid network to its standing equilibrium (same
+        // split as setup(): slow = fast·18/25 of the total rest charge).
+        gridChargeFastV_ = gridChargeRestV_ * (25.0 / 43.0);
+        gridChargeSlowV_ = gridChargeRestV_ * (18.0 / 43.0);
         ipAvgLong_     = Ip_rest_;
         slewState_     = 0.0;
         lastIp_        = Ip_rest_;  // keeps Miller programFactor = 1
@@ -489,7 +830,57 @@ public:
         screenNodeV_   = config_.screenSupplyVolts;
         Vmid_last_     = Vmid_rest_;
         ltpVkLast_     = Vk_rest_;
+        ltpVpPosLast_  = ltpVpPosRest_;
+        ltpVpNegLast_  = ltpVpNegRest_;
+        VpLast_        = Vp_rest_;
+        VpPrev_        = Vp_rest_;
+        VaLast_        = std::max(0.0, Vp_rest_ - Vk_rest_);
+        cfVkLast_      = Vk_rest_;
+        cfVkPrev_      = Vk_rest_;
+        avSmooth_      = avRest_;
+        pinkB0_ = pinkB1_ = pinkB2_ = 0.0;
+        extMagDropNorm_ = 0.0;
+        seMagLastA_     = 0.0;
+        ftVpPrev_  = Vp_rest_;
+        ftVpPrev2_ = Vp_rest_;
+        ftVgPrev_  = 0.0;
+        ftVgPrev2_ = 0.0;
+        lrEL_ = lrJC_ = lrJLm_ = 0.0;
         outputDC_      = restingOutputDC();
+    }
+
+    /// Carry the SLOW (musical-memory) state from a previous incarnation
+    /// of this stage after a parameter-edit rebuild (docs/34 §4.3): warmup
+    /// progress, thermal history, cathode-bounce / blocking-charge deltas,
+    /// noise & hum phase continuity and the output-DC tracker are re-based
+    /// onto the NEW rest point — automating Bias/Drive no longer
+    /// cold-starts the amp.  Solver warm starts stay at the new rest (they
+    /// re-converge within a sample).  Caller guarantees same topology.
+    void carrySlowStateFrom(const TubeStage& o) noexcept
+    {
+        auto fin = [](double v, double fb)
+        { return std::isfinite(v) ? v : fb; };
+
+        warmupCurrent_ = std::clamp(fin(o.warmupCurrent_, 1.0), 0.5, 1.0);
+        ipAvgLong_ = Ip_rest_ + fin(o.ipAvgLong_ - o.Ip_rest_, 0.0);
+        bounce_.primeTo(Vk_rest_
+            + fin(o.bounce_.currentBias() - o.Vk_rest_, 0.0));
+
+        const double oF = o.gridChargeRestV_ * (25.0 / 43.0);
+        const double oS = o.gridChargeRestV_ * (18.0 / 43.0);
+        gridChargeFastV_ = std::max(0.0, gridChargeRestV_ * (25.0 / 43.0)
+            + fin(o.gridChargeFastV_ - oF, 0.0));
+        gridChargeSlowV_ = std::max(0.0, gridChargeRestV_ * (18.0 / 43.0)
+            + fin(o.gridChargeSlowV_ - oS, 0.0));
+
+        heaterPhase_ = fin(o.heaterPhase_, 0.0);
+        if (o.shotRng_ != 0) shotRng_ = o.shotRng_;
+        pinkB0_ = fin(o.pinkB0_, 0.0);
+        pinkB1_ = fin(o.pinkB1_, 0.0);
+        pinkB2_ = fin(o.pinkB2_, 0.0);
+        outputDC_ = restingOutputDC()
+            + fin(o.outputDC_ - o.restingOutputDC(), 0.0);
+        avSmooth_ = avRest_;
     }
 
     // Trigger an instantaneous warm-up simulation (UI button)
@@ -522,18 +913,35 @@ public:
                                          || ! std::isfinite(ipAvgLong_)
                                          || ! std::isfinite(slewState_)
                                          || ! std::isfinite(micY1_)
-                                         || ! std::isfinite(micY2_))
+                                         || ! std::isfinite(micY2_)
+                                         || ! std::isfinite(VpLast_)
+                                         || ! std::isfinite(VpPrev_)
+                                         || ! std::isfinite(VaLast_)
+                                         || ! std::isfinite(cfVkLast_)
+                                         || ! std::isfinite(cfVkPrev_)
+                                         || ! std::isfinite(avSmooth_))
         {
             outputDC_      = Vp_rest_;
             millerState_   = 0.0;
             warmupCurrent_ = 1.0;
             lastIp_        = Ip_rest_;
-            gridChargeFastV_ = 0.0;
-            gridChargeSlowV_ = 0.0;
+            gridChargeFastV_ = gridChargeRestV_ * (25.0 / 43.0);
+            gridChargeSlowV_ = gridChargeRestV_ * (18.0 / 43.0);
             heaterPhase_   = 0.0;
             ipAvgLong_     = Ip_rest_;
             slewState_     = 0.0;
             micX1_ = micX2_ = micY1_ = micY2_ = 0.0;
+            VpLast_   = Vp_rest_;
+            VpPrev_   = Vp_rest_;
+            VaLast_   = std::max(0.0, Vp_rest_ - Vk_rest_);
+            cfVkLast_ = Vk_rest_;
+            cfVkPrev_ = Vk_rest_;
+            avSmooth_ = avRest_;
+            ftVpPrev_  = Vp_rest_;
+            ftVpPrev2_ = Vp_rest_;
+            ftVgPrev_  = 0.0;
+            ftVgPrev2_ = 0.0;
+            lrEL_ = lrJC_ = lrJLm_ = 0.0;
             bounce_.primeTo(Vk_rest_);
             return 0.0;
         }
@@ -547,15 +955,67 @@ public:
         }
 
         // 2) Miller capacitance low-pass (input side, signal-dependent cutoff)
-        double vgSignal = inputSample * config_.inputVoltageSwing;
+        double vgSignal = config_.voltageNativeInput
+            ? inputSample                              // already grid volts
+            : inputSample * config_.inputVoltageSwing;
         if (config_.enableMillerFilter)
             vgSignal = applyMillerFilter(vgSignal);
+
+        // 2b) Miller feedthrough zero (docs/34 §3.5): inject the NONLINEAR
+        //     residual of the plate's last step — actual ΔVp minus the
+        //     linear prediction −|Av|·Δvg — through Cgp and the grid's
+        //     total source impedance.  Cancels identically while the tube
+        //     tracks linearly; on clipped edges the collapsed feedback
+        //     lets the plate edge spit into the grid (the physical
+        //     "pole opens at clip" direction of docs/04 §3.2).
+        if (config_.enableMillerFeedthrough && config_.enableMillerFilter
+            && config_.topology == TubeTopology::CommonCathode
+            && std::isfinite(ftVpPrev_) && std::isfinite(ftVpPrev2_)
+            && std::isfinite(ftVgPrev_) && std::isfinite(ftVgPrev2_))
+        {
+            const double dVpAct = ftVpPrev_ - ftVpPrev2_;
+            const double dVpLin = -avSmooth_ * (ftVgPrev_ - ftVgPrev2_);
+            // Closed-loop divider: the raw feedthrough kRaw = Zsrc·Cgp·fs
+            // feeds a loop whose one-sample gain is kRaw·|Av| (the plate
+            // answers injected grid volts with −|Av| and the residual
+            // re-enters here next sample).  The real circuit's loop is
+            // algebraic and self-limits by exactly this divider — apply it
+            // explicitly so the sampled recursion's gain stays < 1 for ANY
+            // Zsrc·|Av| (kRaw·|Av| reaches ≈ 1 for a 12AU7 driven from a
+            // 220 kΩ plate; the un-normalised form limit-cycled under
+            // TP-switch stress).
+            const double kRaw = gridDriveImpedance()
+                              * config_.Cgp_miller * sampleRate_;
+            const double kFt = kRaw
+                / (1.0 + kRaw * std::max(avSmooth_, 0.0));
+            double ft = kFt * (dVpAct - dVpLin);
+            const double cap = 0.25 * std::max(config_.inputVoltageSwing,
+                                               1.0e-3);
+            ft = std::clamp(ft, -cap, cap);
+            vgSignal += ft;
+        }
 
         // 3) Cathode bypass dynamic bias shift:
         //    CathodeBounce tracks full Vk (including DC). We subtract Vk_rest
         //    to get only the AC perturbation, so that in resting state the
         //    effective bias equals config_.Vg_bias (no artificial offset).
-        const double Vk_full = config_.enableCathodeBounce
+        //
+        //    Cathode followers are EXCLUDED: their cathode node is solved
+        //    implicitly inside step 4 (the legacy one-sample-delayed Vk
+        //    feedback had loop gain gm·Rk ≈ 7 and limit-cycled — the stage
+        //    output was a fixed-amplitude square wave regardless of input).
+        const bool isCathodeFollower =
+            config_.topology == TubeTopology::CathodeFollower;
+        // Unbypassed common cathode is handled by the implicit series-
+        // feedback solve inside step 4 — feeding the (with Ck≈0 nearly
+        // instantaneous) bounce voltage back here as well would apply
+        // the same degeneration twice.
+        const bool ccDegenerated =
+            config_.topology == TubeTopology::CommonCathode
+            && ! config_.enablePentodeModel
+            && config_.Ck < 1.0e-9 && config_.Rk > 1.0;
+        const double Vk_full = (config_.enableCathodeBounce
+                                && ! isCathodeFollower && ! ccDegenerated)
             ? bounce_.currentBias()
             : Vk_rest_;
         const double deltaVk = Vk_full - Vk_rest_;
@@ -590,7 +1050,27 @@ public:
             const double ipDenom = std::max(std::abs(Ip_rest_), 1.0e-9);
             const double ipRatio =
                 std::sqrt(std::abs(lastIp_) / ipDenom);
-            Vg += config_.shotNoiseScale * ipRatio * gaussianApprox_();
+            const double white = gaussianApprox_();
+            // 1/f flicker component (Kellet pink filter): the LF noise
+            // slope of real cathode emission, on top of the white shot
+            // floor.  Both scale with conduction.
+            pinkB0_ = 0.99765 * pinkB0_ + white * 0.0990460;
+            pinkB1_ = 0.96300 * pinkB1_ + white * 0.2965164;
+            pinkB2_ = 0.57000 * pinkB2_ + white * 1.0526913;
+            const double pink =
+                0.25 * (pinkB0_ + pinkB1_ + pinkB2_ + white * 0.1848);
+            // Pentode partition noise: the random division of the space
+            // current between plate and screen adds ~sqrt(1 + 2·Ig2/Ip)
+            // over the triode shot floor — pentode stages genuinely hiss
+            // more than triodes at the same current.
+            double partition = 1.0;
+            if (config_.enablePentodeModel
+                && config_.topology == TubeTopology::CommonCathode)
+                partition = std::min(3.0, std::sqrt(
+                    1.0 + 2.0 * std::max(0.0, lastScreenCurrent_)
+                              / std::max(std::abs(lastIp_), 1.0e-9)));
+            Vg += config_.shotNoiseScale * ipRatio * partition
+                * (white + config_.flickerNoiseRatio * pink);
         }
 
         // 3a) Heater-cathode hum — inject a small 50/60 Hz ripple with
@@ -603,10 +1083,15 @@ public:
             if (heaterPhase_ >= 2.0 * M_PI)
                 heaterPhase_ -= 2.0 * M_PI;
 
+            // Line fundamental from heater-cathode leakage plus a 2nd
+            // harmonic: heating power goes as V², so the emission ripple
+            // rides at 2×line — real hum spectra always show both.
             const double levelMod =
                 1.0 + config_.heaterModDepth * std::abs(vgSignal);
             const double hum =
-                config_.heaterHumAmplitude * levelMod * std::sin(heaterPhase_);
+                config_.heaterHumAmplitude * levelMod
+                * (std::sin(heaterPhase_)
+                   + 0.35 * std::sin(2.0 * heaterPhase_ + 0.6));
             Vg += hum;
         }
 
@@ -622,28 +1107,92 @@ public:
             // Charge on the coupling cap shows up as a voltage offset that
             // *subtracts* from the grid drive (cap holds cathode-positive
             // charge after a grid-positive excursion).
-            const double gridChargeV = gridChargeFastV_ + gridChargeSlowV_;
+            // Referenced to the resting equilibrium charge so that the
+            // continuous law's standing grid-leak bias (~Ig0·R_leak) is
+            // already folded into cfg.Vg_bias ("resting Vgk" convention).
+            const double gridChargeV =
+                gridChargeFastV_ + gridChargeSlowV_ - gridChargeRestV_;
             const double Vg_loaded = Vg - gridChargeV;
 
-            // Instantaneous grid current through the stopper resistor when
-            // the grid is driven past the g-k turn-on voltage.
-            const double Vover = Vg_loaded - config_.gridTurnOnVoltage;
-            const double IgRaw = (Vover > 0.0)
-                ? Vover / config_.gridStopperR
-                : 0.0;
-
-            // Cross damping: under sustained thermal drift, reduce how fast
-            // grid-conduction memory can accumulate in the same direction.
-            const double ipDenom = std::max(std::abs(Ip_rest_), 1.0e-9);
-            const double thermalNorm = config_.enableThermalDrift
-                ? std::clamp((ipAvgLong_ - Ip_rest_) / ipDenom, 0.0, 6.0)
-                : 0.0;
-            const double thermalDamping = 1.0 / (1.0 + 0.35 * thermalNorm);
-            const double Ig = IgRaw * thermalDamping;
+            // Continuous grid-current law: reuse the tube's own Dempwolf
+            // Ig fit, shifted by the contact potential so conduction sets
+            // in softly around Vgk ≈ −0.5 V (Rutt 1984) — the legacy hard
+            // clamp at +0.5 V started a full volt late, had a derivative
+            // discontinuity (aliasing at the conduction corner), and
+            // disagreed with the Ig law already inside plateCurrent().
+            //
+            // The grid node also loads its source THROUGH the stopper
+            // while conducting (positive-peak flattening in real time):
+            //   Vg_eff = Vg_loaded − Ig(Vg_eff)·R_stop
+            // solved by a 2-step Newton on the monotone residual (the
+            // conduction slope dIg/dV·R_stop can exceed 1, so plain
+            // fixed-point iteration would diverge).
+            const double von   = config_.gridTurnOnVoltage;
+            // The grid draws its conduction current THROUGH the same total
+            // drive impedance the Miller model sees: the physical grid
+            // stopper PLUS the upstream stage's instantaneous output
+            // impedance (rp∥Rp of the previous stage, handed in by the
+            // chain).  The legacy code loaded only the stopper, so a stage
+            // fed by a high-Zout driver flattened positive peaks far too
+            // little — the previous stage genuinely cannot source unlimited
+            // grid current.  (Same zUp + stopper series impedance is used
+            // in applyMillerFilter, keeping one grid node = one source Z.)
+            const double rStop = gridDriveImpedance();
+            // The g-k diode sees Vgk, not the grid DRIVE: for a cathode
+            // follower the cathode rides up with the grid, so the actual
+            // junction voltage stays pinned near the bias — without this
+            // offset a follower would accumulate blocking charge it can
+            // physically never generate.  (One-sample-stale Vk; the
+            // follower gain ≈ 1 keeps the error a few mV.)
+            const double cfVkOffset = isCathodeFollower
+                ? (cfVkLast_ - Vk_rest_) : 0.0;
+            // One-sample-stale plate-cathode voltage for the Ig division
+            // region (docs/34 §3.1): when the plate has swung down toward
+            // the grid, the grid competes for the space current and its
+            // conduction (and thus blocking charge) rises several-fold.
+            double VaPrev;
+            if (isCathodeFollower)
+                VaPrev = std::max(1.0, Vb_plus - cfVkLast_);
+            else if (config_.enablePentodeModel
+                     && config_.topology == TubeTopology::CommonCathode)
+                VaPrev = std::max(1.0, VaLast_);
+            else if (config_.topology == TubeTopology::SRPP
+                     || config_.topology == TubeTopology::Cascode)
+                VaPrev = std::max(1.0, Vmid_last_);
+            else if (config_.topology == TubeTopology::LongTailedPair)
+                VaPrev = std::max(1.0,
+                    std::min(ltpVpPosLast_, ltpVpNegLast_) - ltpVkLast_);
+            else
+                VaPrev = std::max(1.0, VpLast_ - Vk_full);
+            double VgEff = Vg_loaded;
+            double Ig;
+            if (Vg_loaded - cfVkOffset + von < -0.5)
+            {
+                // Far below conduction: Ig is leakage-dominated and the
+                // stopper drop is microvolts — one cheap evaluation, no
+                // Newton.  This is the common case at mix levels.
+                Ig = std::max(0.0, triode_.gridCurrent(
+                    Vg_loaded - cfVkOffset + von, VaPrev));
+            }
+            else
+            {
+                for (int it = 0; it < 2; ++it)
+                {
+                    const auto gd = triode_.gridCurrentWithDeriv(
+                        VgEff - cfVkOffset + von, VaPrev);
+                    const double g  = VgEff + gd.Ig * rStop - Vg_loaded;
+                    const double gp = 1.0 + std::max(0.0, gd.dIg) * rStop;
+                    VgEff -= g / gp;
+                    if (! std::isfinite(VgEff)) { VgEff = Vg_loaded; break; }
+                }
+                Ig = std::max(0.0, triode_.gridCurrent(
+                    VgEff - cfVkOffset + von, VaPrev));
+            }
 
             // Two-time-constant blocking memory:
-            //   fast branch   -> "attack squeeze"
-            //   slow branch   -> lingering recovery tail
+            //   fast branch   -> "attack squeeze"  (charges via Ig)
+            //   slow branch   -> lingering recovery tail (dielectric
+            //                    absorption share of the coupling cap)
             const double dt    = 1.0 / sampleRate_;
             const double c = std::max(config_.gridCouplingC, 1.0e-12);
             const double rLeak = std::max(config_.gridLeakR, 1.0e3);
@@ -659,14 +1208,10 @@ public:
             gridChargeFastV_ += dVfast;
             gridChargeSlowV_ += dVslow;
 
-            const double extraBleed = dt * (1.0e-4 + thermalNorm * 5.0e-4);
-            gridChargeFastV_ *= std::max(0.0, 1.0 - extraBleed);
-            gridChargeSlowV_ *= std::max(0.0, 1.0 - extraBleed * 0.35);
-
             if (gridChargeFastV_ < 0.0) gridChargeFastV_ = 0.0;
             if (gridChargeSlowV_ < 0.0) gridChargeSlowV_ = 0.0;
 
-            Vg = Vg_loaded;   // triode sees the blocked grid voltage
+            Vg = VgEff;   // triode sees the loaded, blocked grid voltage
         }
 
         // 4) Plate current.
@@ -710,9 +1255,10 @@ public:
         {
             // Full pentode solver path:
             //   1) solve screen node (g2) from Rs/Cs and last Ig2
-            //   2) evaluate Ip/Ig2/Ig1 with explicit g3 coupling
+            //   2) evaluate Ip/Ig2/Ig1 with explicit g3 coupling, with the
+            //      plate LOAD LINE included (Va = Vb − Ip·Rp − Vk) via a
+            //      damped warm-started fixed point
             //   3) feed Ig2 back into the screen RC state
-            const double Va = std::max(0.0, Vb_plus - Vk_full);
             const double g3Drive =
                 config_.suppressorDrivePolarity
                 * std::max(0.0, config_.suppressorDriveMix)
@@ -721,49 +1267,287 @@ public:
                 ? 0.0 + g3Drive
                 : (config_.suppressorBiasVolts - Vk_full + g3Drive);
 
+            // Plate node via damped fixed point, warm-started from the
+            // previous sample.  Pentode plate curves are flat (high rp),
+            // so the contraction factor Rp·∂Ip/∂Va is well below 1 and
+            // 3 damped iterations land within solver noise.
+            double Va = std::isfinite(VaLast_)
+                ? std::clamp(VaLast_, 1.0, std::max(1.0, Vb_plus))
+                : std::max(1.0, Vb_plus - Vk_full);
+
             double Vg2 = Va;
             if (!config_.pentodeTriodeStrap)
             {
                 const double Rs = std::max(config_.screenResistorOhms, 1.0);
-                const double Cs = std::max(config_.screenBypassFarads, 1.0e-12);
-                const double dt = 1.0 / sampleRate_;
-                const double alpha = std::exp(-dt / (Rs * Cs));
+                // The screen dropper hangs off the SAME B+ rail as the
+                // plate, so PSU sag / ripple / ladder droop reach the
+                // screen too — the legacy constant supply silently
+                // bypassed every rail mechanism for pentode stages.
+                // (screenAlpha_/invVpNominal_ are setup-time constants.)
+                const double supplyEff = config_.screenSupplyVolts
+                    * (Vb_plus * invVpNominal_);
                 const double Vtarget =
-                    config_.screenSupplyVolts - lastScreenCurrent_ * Rs;
-                screenNodeV_ = alpha * screenNodeV_ + (1.0 - alpha) * Vtarget;
+                    supplyEff - lastScreenCurrent_ * Rs;
+                screenNodeV_ = screenAlpha_ * screenNodeV_
+                             + (1.0 - screenAlpha_) * Vtarget;
                 if (!std::isfinite(screenNodeV_))
-                    screenNodeV_ = config_.screenSupplyVolts;
+                    screenNodeV_ = supplyEff;
                 Vg2 = std::max(0.0, screenNodeV_);
             }
 
-            const auto pent = pentode_.evaluate(Va, Vg, Vg2, Vg3);
-            Ip = pent.Ip;
+            // Newton on the plate node with a numeric slope (the pentode
+            // model's analytic plate derivative).  The residual
+            //   g(Va) = Va + warm·Ip(Va)·Rp − (Vb − Vk)
+            // is monotone in Va, so the damped Newton step cannot cycle —
+            // unlike the previous fixed-point relaxation, which diverged
+            // to the clamp floor on steep triode-strapped curves.
+            KorenPentode::Currents pent {};
+            const double VaTarget = std::max(1.0, Vb_plus - Vk_full);
+            // Exact Newton using KorenPentode's analytic ∂Ip/∂Va.  The old
+            // cross-sample secant was excellent for slow (steady-state)
+            // input but took extra iterations on noisy/transient material,
+            // where Va moves every sample — the analytic slope converges in
+            // one or two evaluations regardless.  One pentode evaluation per
+            // iteration, and the slope is exact rather than a stale guess.
+            for (int it = 0; it < 3; ++it)
+            {
+                if (config_.pentodeTriodeStrap)
+                    Vg2 = Va;
+                pent = pentode_.evaluate(Va, Vg, Vg2, Vg3);
+                const double g = Va
+                    + warmupCurrent_ * std::max(0.0, pent.Ip) * config_.Rp
+                    - VaTarget;
+                const double slope = std::clamp(
+                    1.0 + warmupCurrent_ * config_.Rp
+                        * std::max(0.0, pent.dIpdVa),
+                    1.0, 1.0e12);
+                pentSlope_ = slope;
+                if (std::abs(g) < 1.0e-3) break;   // warm start converged
+                Va -= g / slope;
+                if (! std::isfinite(Va)) { Va = VaTarget; break; }
+                Va = std::clamp(Va, 1.0, std::max(1.0, Vb_plus));
+            }
+            VaLast_ = Va;
+            // Plate current from the circuit side of the converged node
+            // (exact KCL, no extra pentode evaluation); the screen RC
+            // uses the last in-loop Ig2, half a Newton step stale.
+            Ip = std::max(0.0, (VaTarget - Va)
+                               / std::max(config_.Rp, 1.0)
+                               / std::max(warmupCurrent_, 1.0e-3));
             lastScreenCurrent_ = pent.Ig2;
+            lastGridCurrent_   = std::max(0.0, pent.Ig1);
+
+            // Operating-point hand-off for the Miller model and the
+            // dynamic output impedance given to the next stage — the
+            // setup()-time triode-proxy values would freeze the pentode's
+            // program-dependent Miller and report a far-too-low Zout
+            // (pentode rp ≫ triode rp).  rpInv comes exactly from the
+            // cached residual slope (pentSlope_ = 1 + warm·Rp·dIp/dVa);
+            // gm follows the Langmuir gm ∝ √I law around the rest point.
+            lastRpInvLoaded_ = std::max(0.0,
+                (pentSlope_ - 1.0) / std::max(config_.Rp, 1.0));
+            lastGmLoaded_ = warmupCurrent_ * gmRest_
+                * std::sqrt(std::max(0.0, Ip)
+                            / std::max(Ip_rest_, 1.0e-9));
             if (!std::isfinite(lastScreenCurrent_) || lastScreenCurrent_ < 0.0)
                 lastScreenCurrent_ = 0.0;
 
-            // One extra correction step tightens g2 equilibrium under hard drive.
-            if (!config_.pentodeTriodeStrap)
-            {
-                const double Rs = std::max(config_.screenResistorOhms, 1.0);
-                const double Cs = std::max(config_.screenBypassFarads, 1.0e-12);
-                const double dt = 1.0 / sampleRate_;
-                const double alpha = std::exp(-dt / (Rs * Cs));
-                const double Vtarget =
-                    config_.screenSupplyVolts - lastScreenCurrent_ * Rs;
-                screenNodeV_ = alpha * screenNodeV_ + (1.0 - alpha) * Vtarget;
-                screenNodeV_ = std::max(0.0, screenNodeV_);
-            }
-            else
-            {
+            // (No second RC advance here — the legacy "extra correction
+            // step" stepped the screen integrator twice per sample, which
+            // silently halved the Rs·Cs time constant.)
+            if (config_.pentodeTriodeStrap)
                 screenNodeV_ = Va;
+        }
+        else if (config_.topology == TubeTopology::LongTailedPair)
+        {
+            // The LTP solves its own pair + tail in the output-node block
+            // below; carry the previous current so the meters stay sane.
+            Ip = lastIp_;
+        }
+        else if (isCathodeFollower)
+        {
+            // Implicit cathode-node solve.  KCL at the cathode:
+            //   warm·Ik(Vb − Vk, VG − Vk) = Vk/Rk + Ck·dVk/dt
+            // (backward Euler on the bypass cap; Ck = 0 → pure algebraic).
+            // Newton converges in 2–3 iterations from the warm start; the
+            // residual derivative is strictly negative so steps never
+            // change sign.  This replaces the legacy one-sample-delayed
+            // Vk feedback, which was unstable for gm·Rk > 1.
+            const double Rk   = std::max(config_.Rk, 1.0);
+            const double dt   = 1.0 / sampleRate_;
+            const double capG = std::max(config_.Ck, 0.0) / dt;
+            const double VG   = Vg + Vk_rest_;   // absolute grid voltage
+            double Vk = std::isfinite(cfVkLast_) ? cfVkLast_ : Vk_rest_;
+            KorenTriode::IpDerivatives d {};
+            for (int it = 0; it < 3; ++it)
+            {
+                d = triode_.evalWithDerivatives(
+                    std::max(1.0, Vb_plus - Vk), VG - Vk);
+                const double IpW = warmupCurrent_ * d.Ip;
+                const double f   = IpW - Vk / Rk - capG * (Vk - cfVkPrev_);
+                const double fp  = -warmupCurrent_ * (d.gm + d.rpInv)
+                                 - 1.0 / Rk - capG;
+                Vk -= f / fp;
+                if (! std::isfinite(Vk)) { Vk = Vk_rest_; break; }
+                Vk = std::clamp(Vk, 0.0, std::max(1.0, Vb_plus));
             }
+            cfVkPrev_ = Vk;
+            cfVkLast_ = Vk;
+            d  = triode_.evalWithDerivatives(
+                std::max(1.0, Vb_plus - Vk), VG - Vk);
+            Ip = warmupCurrent_ * d.Ip;
+            lastGmLoaded_    = warmupCurrent_ * d.gm;
+            lastRpInvLoaded_ = warmupCurrent_ * d.rpInv;
         }
         else
         {
-            Ip = triode_.plateCurrent(Vb_plus, Vg);
+            // Common cathode WITH the plate load line + plate-node stray
+            // capacitance, solved implicitly:
+            //   Cp·dVp/dt + warm·Ip(Vp, Vgk) + (Vp − Vb)/Rp = 0
+            // The legacy code evaluated Ip at Vp = B+ — no plate feedback
+            // at all, i.e. a static waveshaper with gain gm·Rp instead of
+            // the physical gm·(Rp ∥ rp).  Newton, warm-started; the
+            // residual is monotone in Vp.
+            const double dt    = 1.0 / sampleRate_;
+            const double capG  = std::max(config_.Cplate, 0.0) / dt;
+            // Transformer-coupled plates ride the AC load line through
+            // the DCR-anchored idle: Thevenin vOpen = Vb + Rac·Ip_rest,
+            // total slope Rac + DCR, and the plate may swing above the
+            // rail on the cutoff half (inductive flyback).
+            const bool trafoLoad = config_.plateLoadIsTransformer;
+            // Next-stage grid-leak AC loading (docs/34 §3.8): DC still
+            // anchors through Rp to the rail, but the signal load line is
+            // Rp ∥ Rg (the coupling cap is transparent at audio).  The
+            // Thevenin form pivots the slope around the standing current,
+            // so slow rail moves (sag/ripple) still reach the plate with
+            // the full dVp/dVb = 1 weighting.
+            const double rgNext = (! trafoLoad && config_.nextStageLoadR > 1.0)
+                ? config_.nextStageLoadR : 0.0;
+            const double rAcEff = (rgNext > 0.0)
+                ? config_.Rp * rgNext / (config_.Rp + rgNext)
+                : std::max(config_.Rp, 1.0);
+            // SE-OPT magnetizing current this plate must source (docs/34
+            // §2.2) — one-sample-stale drop from the chain, converted and
+            // clamped to the standing current (a gapped SE core cannot
+            // demand more than order-of-idle before the tube cuts off).
+            const double iMagSe = trafoLoad
+                ? std::clamp(extMagDropNorm_ * seMagToAmps_,
+                             -Ip_rest_, Ip_rest_)
+                : 0.0;
+            seMagLastA_ = iMagSe;
+            // Reactive reflected load (docs/34 §2.5): the AC branch becomes
+            // a one-port companion — same Newton, per-sample Thevenin.  The
+            // magnetizing share is folded into the open-circuit voltage
+            // (it bypasses the reflected network through the primary).
+            const bool react = trafoLoad && loadReactive_;
+            const double lrVh = react
+                ? (lrJC_ - lrJLm_) / lrGm_ - lrEL_ : 0.0;
+            const double iMagKcl = react ? 0.0 : iMagSe;
+            const double rLoad = trafoLoad
+                ? (react ? lrRtot_ + std::max(config_.plateLoadDcr, 0.0)
+                         : config_.Rp + std::max(config_.plateLoadDcr, 0.0))
+                : rAcEff;
+            const double vOpen = trafoLoad
+                ? (react ? Vb_plus + lrRtot_ * (Ip_rest_ + iMagSe) - lrVh
+                         : Vb_plus + config_.Rp * Ip_rest_)
+                : (rgNext > 0.0
+                       ? Vb_plus - (config_.Rp - rAcEff) * Ip_rest_
+                       : Vb_plus);
+            const double vMax = trafoLoad
+                ? std::max(1.0, (react ? 3.0 : 2.0) * Vb_plus)
+                : std::max(1.0, Vb_plus);
+            const double gLoad = 1.0 / std::max(rLoad, 1.0);
+            double Vp = std::isfinite(VpLast_)
+                ? std::clamp(VpLast_, 0.0, vMax)
+                : Vp_rest_;
+            KorenTriode::IpDerivatives d {};
+            double IpW = 0.0;
+            for (int it = 0; it < 2; ++it)
+            {
+                // (two warm-started Newton steps; the converged plate
+                // current is then read from the CIRCUIT side below, so
+                // no third device evaluation is needed)
+                double VgkEff = Vg;
+                double degenFactor = 1.0;
+                if (ccDegenerated)
+                {
+                    // Instantaneous series feedback from the unbypassed
+                    // cathode resistor, REST-REFERENCED: only the current
+                    // deviation from idle degenerates the drive, keeping
+                    // the project convention that cfg.Vg_bias is the
+                    // resting Vgk (the setup() rest Newton evaluates at
+                    // Vg_bias with no Rk term).  Solve
+                    //   i = Ip(Vp, Vg − (i − Ip_rest)·Rk)
+                    // by an inner Newton (g' = 1 + gm·Rk, always > 1).
+                    double i = std::max(0.0, lastIp_);
+                    KorenTriode::IpDerivatives di {};
+                    for (int jt = 0; jt < 2; ++jt)
+                    {
+                        di = triode_.evalWithDerivatives(
+                            Vp, Vg - (i - Ip_rest_) * config_.Rk);
+                        const double g  = i - warmupCurrent_ * di.Ip;
+                        const double gp = 1.0 + warmupCurrent_ * di.gm * config_.Rk;
+                        i -= g / gp;
+                        if (! std::isfinite(i)) { i = std::max(0.0, lastIp_); break; }
+                        if (i < 0.0) i = 0.0;
+                    }
+                    VgkEff = Vg - (i - Ip_rest_) * config_.Rk;
+                    // Degeneration also divides the effective slopes —
+                    // reuse the inner solve's final evaluation (same
+                    // arguments) instead of evaluating the device again.
+                    degenFactor = 1.0 / (1.0 + warmupCurrent_ * di.gm * config_.Rk);
+                    d = di;
+                }
+                else
+                {
+                    d = triode_.evalWithDerivatives(Vp, VgkEff);
+                }
+                IpW = warmupCurrent_ * d.Ip;
+                const double f  = IpW - iMagKcl + (Vp - vOpen) * gLoad
+                                + capG * (Vp - VpPrev_);
+                const double fp = warmupCurrent_ * d.rpInv * degenFactor
+                                + gLoad + capG;
+                Vp -= f / fp;
+                if (! std::isfinite(Vp)) { Vp = Vp_rest_; break; }
+                Vp = std::clamp(Vp, 0.0, vMax);
+            }
+            // Read the converged current from the circuit-side KCL: at
+            // the root these agree with the device law, and using the
+            // circuit value keeps PSU draw / cathode charge EXACTLY
+            // consistent with the solved node voltage (and saves a third
+            // device evaluation per sample).  The magnetizing share adds
+            // to the tube's total draw (it flows through the primary).
+            IpW = (vOpen - Vp) * gLoad + iMagKcl - capG * (Vp - VpPrev_);
+            if (IpW < 0.0) IpW = 0.0;
+            VpPrev_ = Vp;
+            VpLast_ = Vp;
+            Ip = IpW;
+
+            // Advance the reactive-load companion histories with the
+            // solved AC branch current (trapezoidal, docs/34 §2.5).
+            if (react)
+            {
+                const double iAc = Ip - Ip_rest_ - iMagSe;
+                const double vM  = (iAc + (lrJC_ - lrJLm_)) / lrGm_;
+                lrEL_  = 2.0 * lrBLe_ * iAc - lrEL_;
+                lrJC_  = 2.0 * lrBCm_ * vM - lrJC_;
+                lrJLm_ = 2.0 * vM * lrInvBLm_ + lrJLm_;
+                if (! std::isfinite(lrEL_) || ! std::isfinite(lrJC_)
+                    || ! std::isfinite(lrJLm_))
+                    lrEL_ = lrJC_ = lrJLm_ = 0.0;
+            }
+            lastGmLoaded_    = warmupCurrent_ * d.gm;
+            lastRpInvLoaded_ = warmupCurrent_ * d.rpInv;
         }
-        Ip *= warmupCurrent_;
+        // Warmup for the stacked topologies is applied after their joint
+        // solve (legacy convention); the CC / CF / pentode paths fold it
+        // into the node equations above.
+        if (config_.topology == TubeTopology::SRPP
+            || config_.topology == TubeTopology::Cascode)
+            Ip *= warmupCurrent_;
+        else if (config_.enablePentodeModel
+                 && config_.topology == TubeTopology::CommonCathode)
+            Ip *= warmupCurrent_;
 
         // 4-mic) Microphonic coupling — drive a body-resonance bandpass
         //     with Ip swing, then use its output to modulate gm.  The
@@ -788,19 +1572,38 @@ public:
         lastIp_ = Ip;
 
         // 4b) Advance the long-term average that drives thermal bias
-        //     drift.  Use |Ip| so both polarities of signal heat the
-        //     cathode identically (it's a thermal process, not a
-        //     directional one).
+        //     drift.  Driven by mean CATHODE current (docs/03 §2.3:
+        //     sustained heavy conduction shifts emission and the
+        //     operating point over seconds — "the amp sits down").
+        //     Deliberately NOT anode dissipation: in class A the anode
+        //     actually runs cooler under drive (power moves to the
+        //     load), which is the wrong sign for the documented effect.
         if (config_.enableThermalDrift)
         {
             ipAvgLong_ = thermalAlpha_ * ipAvgLong_
                        + (1.0 - thermalAlpha_) * std::abs(Ip);
         }
 
-        // 5) Update cathode bypass state with new Ip (for next sample)
-        const double Vk_new = config_.enableCathodeBounce
-            ? bounce_.process(Ip)
-            : Vk_rest_;
+        // 5) Update cathode bypass state with the new CATHODE current
+        //    (for a pentode that is Ip + Ig2 — both pass through Rk; the
+        //    legacy code dropped the screen share of the self-bias).
+        //    Skipped for cathode followers — their cathode node is the
+        //    implicitly solved cfVkLast_, not the slow bounce tracker.
+        if (config_.enableCathodeBounce && ! isCathodeFollower)
+        {
+            // Cathode current returns through Rk: for a pentode that is
+            // Ip + Ig2 + Ig1 (all three currents originate from the same
+            // emitted space charge and flow back through the cathode
+            // resistor — the g1-conduction share matters on hard-driven
+            // Culture Vulture positive peaks).
+            const bool isPentode = config_.enablePentodeModel
+                && config_.topology == TubeTopology::CommonCathode;
+            const double Ik = Ip
+                + (isPentode ? std::max(0.0, lastScreenCurrent_)
+                             + std::max(0.0, lastGridCurrent_)
+                             : 0.0);
+            bounce_.process(Ik);
+        }
 
         // 6) Pick the appropriate output node.
         //    Common cathode      → Vp = Vb+ − Ip·Rp (inverting amp, default)
@@ -816,8 +1619,13 @@ public:
         double normalizer;
         if (config_.topology == TubeTopology::CathodeFollower)
         {
-            rawOut     = Vk_new;
-            normalizer = std::max(std::abs(Vk_rest_) * 2.0, 1.0);
+            // The implicitly-solved cathode voltage IS the output node.
+            // A follower's voltage gain is ≈ µ/(µ+1) ≈ 1, so the natural
+            // normalizer is the input swing — the legacy |Vk_rest|·2
+            // normalizer was calibrated against the unstable explicit
+            // solver and has no physical meaning.
+            rawOut     = cfVkLast_;
+            normalizer = std::max(config_.inputVoltageSwing, 1.0e-3);
         }
         else if (config_.topology == TubeTopology::SRPP)
         {
@@ -833,29 +1641,55 @@ public:
         }
         else if (config_.topology == TubeTopology::LongTailedPair)
         {
-            const double mm = std::clamp(config_.ltpTubeMismatch, -0.45, 0.45);
+            // Pair parameters are configured once in setup(); the legacy
+            // per-sample setParams() rebuild was redundant.
             const double rpRatio = std::max(0.2, config_.ltpPlateRRatio);
-            auto tubeP = config_.tube;
-            auto tubeN = config_.tube;
-            tubeP.G  *= (1.0 + mm);
-            tubeP.mu *= (1.0 - 0.5 * mm);
-            tubeN.G  *= (1.0 - mm);
-            tubeN.mu *= (1.0 + 0.5 * mm);
-            ltpTriodePos_.setParams(tubeP);
-            ltpTriodeNeg_.setParams(tubeN);
+            const double RpPos = config_.Rp;
+            const double RpNeg = config_.Rp * rpRatio;
 
             const double vDrive = Vg - config_.Vg_bias;
             const double VgPos = config_.Vg_bias + vDrive;
             const double VgNeg = config_.Vg_bias - vDrive;
 
+            // Per-side plate load-line Newton given (Vk, Vg_side):
+            //   f(Vp) = warm·Ip(Vp, Vg − Vk) + (Vp − Vb)/Rp = 0
+            auto solvePlate = [this, Vb_plus](const KorenTriode& tube,
+                                              double VgSide, double Vk,
+                                              double Rp, double& VpWarm)
+            {
+                const double gLoad = 1.0 / std::max(Rp, 1.0);
+                double Vp = std::isfinite(VpWarm)
+                    ? std::clamp(VpWarm, 0.0, std::max(1.0, Vb_plus))
+                    : Vb_plus * 0.7;
+                KorenTriode::IpDerivatives d {};
+                for (int it = 0; it < 2; ++it)
+                {
+                    d = tube.evalWithDerivatives(Vp, VgSide - Vk);
+                    const double f  = warmupCurrent_ * d.Ip
+                                    + (Vp - Vb_plus) * gLoad;
+                    const double fp = warmupCurrent_ * d.rpInv + gLoad;
+                    Vp -= f / fp;
+                    if (! std::isfinite(Vp)) { Vp = Vb_plus * 0.7; break; }
+                    Vp = std::clamp(Vp, 0.0, std::max(1.0, Vb_plus));
+                }
+                d = tube.evalWithDerivatives(Vp, VgSide - Vk);
+                VpWarm = Vp;
+                return d;
+            };
+
             double Vk = std::max(0.0, ltpVkLast_);
             const double tailR = std::max(config_.ltpTailR, 1.0);
+            KorenTriode::IpDerivatives p {}, n {};
             for (int it = 0; it < std::max(1, config_.ltpSolverIters); ++it)
             {
-                const auto p = ltpTriodePos_.evalWithDerivatives(Vb_plus, VgPos - Vk);
-                const auto n = ltpTriodeNeg_.evalWithDerivatives(Vb_plus, VgNeg - Vk);
-                const double f = p.Ip + n.Ip - Vk / tailR;
-                const double fp = -(p.gm + n.gm) - 1.0 / tailR;
+                p = solvePlate(ltpTriodePos_, VgPos, Vk, RpPos, ltpVpPosLast_);
+                n = solvePlate(ltpTriodeNeg_, VgNeg, Vk, RpNeg, ltpVpNegLast_);
+                const double f = warmupCurrent_ * (p.Ip + n.Ip) - Vk / tailR;
+                // With the plate load line active each side's current
+                // responds to Vk with the degenerated slope gm/(1+Rp·rpInv).
+                const double gmP = p.gm / (1.0 + RpPos * p.rpInv);
+                const double gmN = n.gm / (1.0 + RpNeg * n.rpInv);
+                const double fp = -warmupCurrent_ * (gmP + gmN) - 1.0 / tailR;
                 if (std::abs(fp) < 1.0e-15) break;
                 Vk -= f / fp;
                 if (! std::isfinite(Vk)) { Vk = ltpVkLast_; break; }
@@ -863,31 +1697,63 @@ public:
             }
             ltpVkLast_ = Vk;
 
-            const auto p = ltpTriodePos_.evalWithDerivatives(Vb_plus, VgPos - Vk);
-            const auto n = ltpTriodeNeg_.evalWithDerivatives(Vb_plus, VgNeg - Vk);
-            const double VpPos = Vb_plus - p.Ip * config_.Rp;
-            const double VpNeg = Vb_plus - n.Ip * config_.Rp * rpRatio;
+            // Use the last tail iteration's plate solutions directly —
+            // a post-loop re-solve would duplicate both sides' Newton
+            // work for a half-step refinement below solver noise.
+            const double VpPos = ltpVpPosLast_;
+            const double VpNeg = ltpVpNegLast_;
 
             const double diff = 0.5 * (VpNeg - VpPos);
             const double cm = 0.5 * (VpPos + VpNeg) - Vp_rest_;
             rawOut = diff + std::clamp(config_.ltpCommonModeLeak, 0.0, 1.0) * cm;
             normalizer = config_.Vp_nominal;
-            Ip = 0.5 * (p.Ip + n.Ip);
+            Ip = warmupCurrent_ * 0.5 * (p.Ip + n.Ip);
             lastIp_ = Ip;
+            lastGmLoaded_    = warmupCurrent_ * 0.5 * (p.gm + n.gm);
+            lastRpInvLoaded_ = warmupCurrent_ * 0.5 * (p.rpInv + n.rpInv);
         }
-        else  // CommonCathode
+        else  // CommonCathode (triode: solved plate node; pentode: VaLast_)
         {
-            rawOut     = Vb_plus - Ip * config_.Rp;
+            if (config_.enablePentodeModel)
+            {
+                rawOut = std::clamp(VaLast_ + Vk_full, 0.0,
+                                    std::max(1.0, Vb_plus));
+                VpLast_ = rawOut;
+            }
+            else
+            {
+                rawOut = VpLast_;
+            }
             normalizer = config_.Vp_nominal;
         }
 
         // 7) AC-couple output (subtract slow-tracked DC operating point).
-        const double ac = rawOut - outputDC_;
+        //    The tracker corner is fixed in Hz (sample-rate derived) — the
+        //    old hard-coded 0.9999 moved from 0.8 Hz at 1× to ~12 Hz at
+        //    16× oversampling, eating bass as the user raised OS quality.
+        //    The SE magnetizing de-embed subtracts the LINEAR share of the
+        //    node's response to the injected magnetizing current (rest
+        //    rp ∥ Rtot), so the downstream OPT's own calibrated drop is
+        //    not double-counted; only the tube's nonlinear struggle to
+        //    supply the iron reaches the output (docs/34 §2.2).
+        const double ac = rawOut - outputDC_ - seMagZRest_ * seMagLastA_;
+        outputDC_ = dcLeakAlpha_ * outputDC_ + (1.0 - dcLeakAlpha_) * rawOut;
 
-        constexpr double dcLeakAlpha = 0.9999;
-        outputDC_ = dcLeakAlpha * outputDC_ + (1.0 - dcLeakAlpha) * rawOut;
+        // Voltage-native output (docs/34 §4.1): plate AC in VOLTS around
+        // the STATIC rest anchor — the tracker keeps running for meters,
+        // but the slow operating-point wobble it would have eaten now
+        // PASSES to the interstage coupling (real bias pumping).  The
+        // level factors live in the chain-side pad instead.
+        if (config_.voltageNativeOutput)
+            return rawOut - restingOutputDC()
+                 - seMagZRest_ * seMagLastA_;
 
-        double yNorm = config_.outputGainLinear * ac / normalizer;
+        // outputMakeup_ restores the legacy small-signal gain calibration
+        // (computed at setup from the resting rp ∥ Rp divider) so that the
+        // load-line physics changes the CURVATURE — the distortion shape,
+        // headroom feel, sag interaction — without re-leveling every
+        // preset's gain staging.
+        double yNorm = config_.outputGainLinear * outputMakeup_ * ac / normalizer;
 
         // 8) Asymmetric slew-rate limit — operates on the normalized output
         //    so the rates are independent of preset / Vp scaling.  Rising
@@ -906,6 +1772,14 @@ public:
             slewState_ += delta;
             yNorm = slewState_;
         }
+
+        // Miller-feedthrough history (plate steps + the grid drive that
+        // produced them) for next sample's nonlinear-residual term.
+        ftVpPrev2_ = ftVpPrev_;
+        ftVpPrev_  = VpLast_;
+        ftVgPrev2_ = ftVgPrev_;
+        ftVgPrev_  = vgSignal;
+
         return yNorm;
     }
 
@@ -916,6 +1790,7 @@ public:
     double lastScreenCurrent() const noexcept { return lastScreenCurrent_; }
     double lastScreenVoltage() const noexcept { return screenNodeV_; }
     double restingPlateCurrent() const noexcept { return Ip_rest_; }
+    double restingPlateVoltage() const noexcept { return Vp_rest_; }
     double blockingMemoryVolts() const noexcept
     {
         return std::max(0.0, gridChargeFastV_ + gridChargeSlowV_);
@@ -926,9 +1801,11 @@ public:
     }
     double cathodeStressDrive() const noexcept
     {
-        const double deltaVk = config_.enableCathodeBounce
-            ? std::abs(bounce_.currentBias() - Vk_rest_)
-            : 0.0;
+        double deltaVk = 0.0;
+        if (config_.topology == TubeTopology::CathodeFollower)
+            deltaVk = std::abs(cfVkLast_ - Vk_rest_);
+        else if (config_.enableCathodeBounce)
+            deltaVk = std::abs(bounce_.currentBias() - Vk_rest_);
         return std::clamp(deltaVk / 3.0, 0.0, 1.0);
     }
     double thermalMemoryDrive() const noexcept
@@ -952,6 +1829,109 @@ public:
     }
     const KorenTriode& triode() const noexcept { return triode_; }
     KorenTriode& triodeRef() noexcept { return triode_; }
+
+    /// Level-calibration factors for the chain's voltage-native pad
+    /// synthesis (docs/34 §4.1): pad_i = outputGainLinear·makeup·swing_{i+1}
+    /// / normalizer — the SAME product the legacy normalized hand-off
+    /// applied, expressed as one explicit inter-stage attenuator.
+    double outputMakeupFactor() const noexcept { return outputMakeup_; }
+    double outputNormalizer() const noexcept
+    {
+        switch (config_.topology)
+        {
+            case TubeTopology::CathodeFollower:
+                return std::max(config_.inputVoltageSwing, 1.0e-3);
+            case TubeTopology::SRPP:
+                return std::max(config_.Vp_nominal * 0.5, 1.0);
+            default:
+                return std::max(config_.Vp_nominal, 1.0);
+        }
+    }
+
+    /// Normalized small-signal in→out gain at the resting operating point,
+    /// assembled from the same setup-time quantities the level calibration
+    /// uses (avRest_·outputMakeup_ ≈ the legacy calibrated gain for the CC
+    /// paths).  Exact-ish for CC (the topology every NFB preset uses);
+    /// conservative approximations for the stacked topologies.  Used by
+    /// TubeAmpChain to derive the global-NFB β analytically — the sample
+    /// probe it replaces rendered ~5k chain samples inside setup(), which
+    /// runs on the audio thread during rebuilds (docs/34 §2.1).
+    double smallSignalGainNorm() const noexcept
+    {
+        const double g = config_.outputGainLinear * outputMakeup_;
+        switch (config_.topology)
+        {
+            case TubeTopology::CathodeFollower:
+            {
+                // Follower gain gm/(gm + 1/rp + 1/Rk) ≈ µ/(µ+1); the CF
+                // normalizer is the input swing, so the swing cancels.
+                const double gT = lastGmLoaded_ + lastRpInvLoaded_
+                                + 1.0 / std::max(config_.Rk, 1.0);
+                const double av = (gT > 1.0e-12) ? lastGmLoaded_ / gT : 1.0;
+                return av * g;
+            }
+            case TubeTopology::SRPP:
+                return config_.inputVoltageSwing * avRest_ * g
+                     / std::max(config_.Vp_nominal * 0.5, 1.0);
+            case TubeTopology::Cascode:
+            case TubeTopology::LongTailedPair:
+            case TubeTopology::CommonCathode:
+            default:
+                return config_.inputVoltageSwing * avRest_ * g
+                     / std::max(config_.Vp_nominal, 1.0);
+        }
+    }
+
+    /// Instantaneous output impedance at the solved operating point —
+    /// what the NEXT stage's grid actually sees driving its Miller input
+    /// capacitance (docs/04 §2).  Common cathode: Rp ∥ rp.  Cathode
+    /// follower: (rp/(µ+1)) ∥ Rk == 1/(gm + 1/rp) ∥ Rk.  The stacked
+    /// topologies approximate with their dominant term.
+    double lastOutputImpedance() const noexcept
+    {
+        switch (config_.topology)
+        {
+            case TubeTopology::CathodeFollower:
+            {
+                const double gTube = lastGmLoaded_ + lastRpInvLoaded_;
+                const double gRk   = 1.0 / std::max(config_.Rk, 1.0);
+                return 1.0 / std::max(gTube + gRk, 1.0e-9);
+            }
+            case TubeTopology::SRPP:
+                return 1.0 / std::max(lastGmLoaded_, 1.0e-9);
+            case TubeTopology::Cascode:
+                return std::max(config_.Rp_upper, 1.0);
+            case TubeTopology::LongTailedPair:
+            case TubeTopology::CommonCathode:
+            default:
+            {
+                const double g = 1.0 / std::max(config_.Rp, 1.0)
+                               + std::max(lastRpInvLoaded_, 0.0);
+                return 1.0 / std::max(g, 1.0e-9);
+            }
+        }
+    }
+
+    /// Chain hook: the previous stage's instantaneous output impedance,
+    /// used as the Miller-filter source impedance for this stage.  Pass
+    /// 0 to fall back to the static config value.
+    void setDynamicSourceImpedance(double z) noexcept
+    {
+        dynamicSourceZ_ = std::isfinite(z) ? z : 0.0;
+    }
+
+    /// Chain hook (docs/34 §2.2, single-ended OPT): normalized magnetizing
+    /// drop reported by the output transformer.  Only meaningful when this
+    /// stage's plate load IS the OPT (plateLoadIsTransformer) — the SE
+    /// primary's magnetizing current is then sourced by this tube's plate
+    /// in the node KCL next sample.  Sign note: the OPT integrates the
+    /// stage's PLATE-VOLTAGE-proportional output, whereas the primary's
+    /// physical volt-seconds are (Vb − Vp) — inverted — so the conversion
+    /// constant (seMagToAmps_, setup-time) carries the minus sign.
+    void setMagnetizingDropNorm(double dropNorm) noexcept
+    {
+        extMagDropNorm_ = std::isfinite(dropNorm) ? dropNorm : 0.0;
+    }
 
 private:
     // ─────────────────────────────────────────────────────────────────────
@@ -1042,35 +2022,73 @@ private:
         if (config_.pentodeTriodeStrap)
             return std::max(0.0, Va);
 
+        // Bisection on r(Vg2) = Vg2 − (supply − Ig2(Vg2)·Rs).  Both terms
+        // rise with Vg2, so r is monotone — the previous damped relaxation
+        // oscillated whenever Rs·dIg2/dVg2 approached 1 and reported a
+        // screen voltage inconsistent with its own screen current.
         const double Rs = std::max(config_.screenResistorOhms, 1.0);
-        double Vg2 = std::max(0.0, config_.screenSupplyVolts);
-        for (int it = 0; it < 10; ++it)
+        double lo = 0.0;
+        double hi = std::max(1.0, config_.screenSupplyVolts);
+        double Vg2 = hi;
+        for (int it = 0; it < 40; ++it)
         {
+            Vg2 = 0.5 * (lo + hi);
             const auto p = pentode_.evaluate(Va, Vg1, Vg2, Vg3);
-            const double next = std::max(0.0, config_.screenSupplyVolts - p.Ig2 * Rs);
-            Vg2 = 0.6 * Vg2 + 0.4 * next;
+            const double r = Vg2
+                - (config_.screenSupplyVolts
+                   - std::max(0.0, p.Ig2) * Rs);
+            if (r > 0.0) hi = Vg2; else lo = Vg2;
         }
         return Vg2;
     }
 
     void solvePentodeRestPoint(double Vb) noexcept
     {
+        // Rest point with the plate LOAD LINE included (the legacy code
+        // evaluated the pentode at Va = Vb − Vk, no Rp drop).  The inner
+        // plate solve uses BISECTION on the monotone residual
+        //   g(Va) = Va + Ip(Va)·Rp − (Vb − Vk)
+        // — steep triode-strapped curves made relaxation iterate to the
+        // clamp floor; bisection cannot.
         double Vk = std::max(0.0, Vk_rest_);
         double Ip = 0.0;
+        double Ig2 = 0.0;
+        double Va = Vb * 0.5;
         double Vg2 = config_.screenSupplyVolts;
-        for (int it = 0; it < 24; ++it)
+        for (int it = 0; it < 16; ++it)
         {
-            const double Va = std::max(0.0, Vb - Vk);
             const double Vg1 = config_.Vg_bias - Vk;
             const double Vg3 = config_.suppressorTieToCathode
                 ? 0.0
                 : (config_.suppressorBiasVolts - Vk);
-            Vg2 = solveScreenNodeQuiescent(Va, Vg1, Vg3);
-            const auto p = pentode_.evaluate(Va, Vg1, Vg2, Vg3);
-            Ip = p.Ip;
-            const double VkNew = std::max(0.0, Ip * config_.Rk);
-            Vk = 0.65 * Vk + 0.35 * VkNew;
-            if (!std::isfinite(Vk))
+            const double VaTarget = std::max(1.0, Vb - Vk);
+
+            double lo = 1.0, hi = VaTarget;
+            for (int b = 0; b < 40; ++b)
+            {
+                Va = 0.5 * (lo + hi);
+                const double vg2Probe = config_.pentodeTriodeStrap
+                    ? Va : solveScreenNodeQuiescent(Va, Vg1, Vg3);
+                const auto probe = pentode_.evaluate(Va, Vg1, vg2Probe, Vg3);
+                const double ipProbe = std::max(0.0, probe.Ip);
+                const double g = Va + ipProbe * config_.Rp - VaTarget;
+                if (g > 0.0) hi = Va; else lo = Va;
+                Ip = ipProbe;
+                Ig2 = std::max(0.0, probe.Ig2);
+                Vg2 = vg2Probe;
+            }
+
+            // Self-bias: plate, screen AND control-grid currents all return
+            // through Rk (Ig1 is leak-dominated at the negative resting bias,
+            // but included for exact charge conservation with process()).
+            const double Ig1Rest = std::max(0.0,
+                pentode_.evaluate(Va, Vg1,
+                    config_.pentodeTriodeStrap ? Va : Vg2, Vg3).Ig1);
+            const double VkNew =
+                std::max(0.0, (Ip + Ig2 + Ig1Rest) * config_.Rk);
+            if (std::abs(VkNew - Vk) < 1.0e-4) { Vk = VkNew; break; }
+            Vk = 0.5 * Vk + 0.5 * VkNew;
+            if (!std::isfinite(Vk) || !std::isfinite(Ip))
             {
                 Vk = 0.0;
                 Ip = 0.0;
@@ -1083,7 +2101,7 @@ private:
         Vp_rest_ = std::max(0.0, Vb - Ip_rest_ * config_.Rp);
         screenNodeV_ = std::max(0.0, Vg2);
         lastScreenCurrent_ = pentode_.evaluate(
-            std::max(0.0, Vb - Vk_rest_),
+            std::max(0.0, Vp_rest_ - Vk_rest_),
             config_.Vg_bias - Vk_rest_,
             screenNodeV_,
             config_.suppressorTieToCathode ? 0.0 : (config_.suppressorBiasVolts - Vk_rest_)
@@ -1131,33 +2149,55 @@ private:
         }
     }
 
-    // Signal-dependent Miller low-pass (docs/04 §3.2–§3.3)
-    //   fc = 1 / (2π · Zsource · Cmiller)
-    //   Cmiller ≈ Cgp · (1 + |Av|) · programFactor
-    //   |Av| static component uses quiescent gm.
-    //   programFactor depends on the previous sample's |Ip| so heavy
-    //   conduction momentarily grows C_m and rolls HF off a touch more.
+    // Signal-dependent Miller low-pass (docs/04 §3.1–§3.2)
+    //   C_in = Cgk + Cgp·(1 + |Av|)
+    //   fc   = 1 / (2π · Zsource · C_in)
+    //
+    // |Av| now comes from the SOLVED operating point: Av = gm·(Rp ∥ rp),
+    // refreshed each sample by the plate-node Newton.  This fixes two
+    // legacy errors: (1) |Av| used gm·Rp — the same missing-load-line
+    // factor of ~7 as the old transfer curve; (2) the program dependence
+    // had the wrong sign — docs/04 §3.2: approaching saturation/cutoff
+    // the incremental gain DROPS, so C_m shrinks and the top end OPENS,
+    // whereas the old heuristic darkened loud passages.
+    //
+    // Zsource prefers the dynamic value handed in by the chain (the
+    // previous stage's instantaneous rp ∥ Rp); the static config value is
+    // the fallback for stage 1 / standalone use.
+    // Total impedance driving the grid node: the upstream stage's
+    // instantaneous output impedance (chain-injected rp∥Rp, or the static
+    // config fallback for stage 1) in SERIES with the physical grid stopper.
+    // Both the Miller input RC and the grid-conduction loading Newton read
+    // this single value so one physical node has one source impedance.
+    double gridDriveImpedance() const noexcept
+    {
+        const double zUp = (dynamicSourceZ_ > 1.0)
+            ? dynamicSourceZ_ : config_.sourceImpedance;
+        return std::max(1.0, zUp + std::max(0.0, config_.gridStopperR));
+    }
+
     double applyMillerFilter(double x) noexcept
     {
-        const double gmStatic = gmRest_ * warmupCurrent_;
-        const double absAvStatic = std::abs(gmStatic * config_.Rp);
+        double avInst = avRest_;
+        if (config_.Rp > 1.0)
+            avInst = lastGmLoaded_ * rAcEff_
+                   / (1.0 + rAcEff_ * lastRpInvLoaded_);
+        avSmooth_ += avAlpha_ * (avInst - avSmooth_);
 
-        // Dynamic gain factor driven by the last sample's conduction.
-        // Physical reasoning: gm ∝ Ip (Koren); heavy conduction raises
-        // |Av| → bigger Miller → HF cutoff drops.  Cutoff portions have
-        // gm ≈ 0, but we *don't* want them to reduce C_m below the
-        // quiescent value (the stray Cgp is still there even when the
-        // tube's off), so we clamp the factor ≥ 1.
-        const double ipDenom = std::max(std::abs(Ip_rest_), 1.0e-9);
-        const double ipNorm  = std::abs(lastIp_) / ipDenom;
-        const double factor  = std::max(
-            1.0,
-            1.0 + config_.millerSignalDepth * (ipNorm - 1.0));
+        const double depth = std::clamp(config_.millerSignalDepth, 0.0, 1.0);
+        const double avEff = std::max(0.0,
+            avRest_ + depth * (avSmooth_ - avRest_));
 
-        const double Cmiller = config_.Cgp_miller
-                             * (1.0 + absAvStatic * factor);
-        const double fc =
-            1.0 / (2.0 * M_PI * config_.sourceImpedance * Cmiller);
+        const double Cin = config_.tube.Cgk
+                         + config_.Cgp_miller * (1.0 + avEff);
+        // Source impedance for the Miller RC = upstream Zout + grid stopper
+        // (see gridDriveImpedance()).  The stopper's whole purpose is to
+        // form this HF-taming RC with the grid input capacitance; the legacy
+        // Miller ignored it, so the corner sat far above audio on every
+        // preset regardless of the stopper the circuit actually has.
+        const double zSrc = gridDriveImpedance();
+        const double fc = 1.0 / (2.0 * M_PI * std::max(zSrc, 1.0)
+                                 * std::max(Cin, 1.0e-13));
 
         const double alpha =
             1.0 - std::exp(-2.0 * M_PI * fc / sampleRate_);
@@ -1185,6 +2225,52 @@ private:
     double Vmid_last_ { 100.0 };  ///< Newton-Raphson warm start
     double ltpVkLast_ { 0.0 };
     double ltpOutRest_ { 0.0 };
+    double ltpVpPosLast_ { 0.0 };  ///< LTP per-side plate warm starts
+    double ltpVpNegLast_ { 0.0 };
+    double ltpVpPosRest_ { 0.0 };
+    double ltpVpNegRest_ { 0.0 };
+
+    // Plate / cathode node-solver state (load-line physics)
+    double VpLast_   { 0.0 };  ///< CC solved plate voltage (warm start)
+    double VpPrev_   { 0.0 };  ///< Cplate backward-Euler cap state
+    double VaLast_   { 0.0 };  ///< Pentode plate-cathode warm start
+    double pentSlope_{ 10.0 }; ///< Cached pentode-residual secant slope
+    double screenAlpha_  { 0.999 };  ///< Screen RC pole (setup constant)
+    double invVpNominal_ { 1.0 / 250.0 };
+    double cfVkLast_ { 0.0 };  ///< CF solved cathode voltage
+    double cfVkPrev_ { 0.0 };  ///< CF bypass-cap backward-Euler state
+    double lastGmLoaded_    { 0.0 };  ///< gm at the solved operating point
+    double lastRpInvLoaded_ { 0.0 };  ///< 1/rp at the solved operating point
+    double avRest_   { 0.0 };  ///< Resting |Av| = gm·(RpEff ∥ rp)
+    double avSmooth_ { 0.0 };  ///< ~0.7 ms smoothed instantaneous |Av|
+    double avAlpha_  { 0.0 };
+    double rAcEff_   { 100.0e3 }; ///< AC plate load Rp ∥ Rg_next (§3.8)
+    double dynamicSourceZ_ { 0.0 };   ///< Chain-injected upstream Zout
+    double outputMakeup_   { 1.0 };   ///< Legacy-gain calibration factor
+    double dcLeakAlpha_    { 0.9999 };///< 0.5 Hz DC tracker (fs-derived)
+
+    // SE-OPT magnetizing coupling (docs/34 §2.2, transformer-loaded CC)
+    double extMagDropNorm_ { 0.0 };   ///< Chain-injected OPT drop (norm.)
+    double seMagToAmps_    { 0.0 };   ///< dropNorm → primary amps (setup)
+    double seMagZRest_     { 0.0 };   ///< rp ∥ Rtot at rest (de-embed)
+    double seMagLastA_     { 0.0 };   ///< iMag used this sample [A]
+
+    // Miller feedthrough history (docs/34 §3.5)
+    double ftVpPrev_  { 0.0 };
+    double ftVpPrev2_ { 0.0 };
+    double ftVgPrev_  { 0.0 };
+    double ftVgPrev2_ { 0.0 };
+
+    // Reactive-load companion (docs/34 §2.5): setup constants + histories
+    bool   loadReactive_ { false };
+    double lrBLe_    { 0.0 };   ///< β·Le (voice-coil inductor companion R)
+    double lrBCm_    { 0.0 };   ///< β·Cm
+    double lrInvBLm_ { 0.0 };   ///< 1/(β·Lm)
+    double lrGm_     { 1.0 };   ///< motional node conductance
+    double lrRtot_   { 0.0 };   ///< per-sample port resistance
+    double lrEL_     { 0.0 };   ///< inductor history EMF
+    double lrJC_     { 0.0 };   ///< capacitor history source
+    double lrJLm_    { 0.0 };   ///< motional-inductor history source
 
     // Time-varying states
     double warmupAlpha_    { 0.0 };
@@ -1194,16 +2280,19 @@ private:
     double outputDC_       { 0.0 };
     double lastIp_         { 0.0 };  ///< Last computed plate current (for PSU)
     double lastScreenCurrent_ { 0.0 };
+    double lastGridCurrent_   { 0.0 };  ///< Pentode g1 conduction current
     double screenNodeV_    { 0.0 };
     double gmRest_         { 0.0 };
     double gridChargeFastV_ { 0.0 }; ///< Fast blocking branch [V]
     double gridChargeSlowV_ { 0.0 }; ///< Slow recovery branch [V]
+    double gridChargeRestV_ { 0.0 }; ///< Standing grid-leak equilibrium [V]
     double heaterPhase_    { 0.0 };
     double heaterPhaseInc_ { 0.0 };
     double thermalAlpha_   { 0.0 };  ///< IIR coeff for long-τ envelope
-    double ipAvgLong_      { 0.0 };  ///< Slow Ip average [A]
+    double ipAvgLong_      { 0.0 };  ///< Slow mean-|Ip| envelope [A]
     double slewState_      { 0.0 };  ///< Rate-limited output carry
     std::uint64_t shotRng_ { 0xA5A5A5A5A5A5A5A5ULL };  ///< xorshift64 state
+    double pinkB0_ { 0.0 }, pinkB1_ { 0.0 }, pinkB2_ { 0.0 };  ///< 1/f filter
 
     // Microphonic biquad bandpass state (RBJ form, DF-I)
     double micB0_ { 0.0 }, micB1_ { 0.0 }, micB2_ { 0.0 };
@@ -1287,6 +2376,8 @@ inline TubeStageConfig v72Stage1()
         .sourceImpedance = 600.0  // after input transformer step-up
     };
     s.enableHeaterHum = true;       // vintage AC-heated Neve V72 character
+    s.gridStopperR = 2.2e3;         // broadcast preamp: small stopper →
+                                    // Miller corner stays well above audio
     return s;
 }
 
@@ -1310,6 +2401,7 @@ inline TubeStageConfig v72Stage2()
         .sourceImpedance = 10.0e3  // output of Stage 1
     };
     s.enableHeaterHum = true;
+    s.gridStopperR = 2.2e3;         // broadcast driver, small stopper
     // Driver stage is further from the heater wiring loom → a touch less
     // coupling than Stage 1.
     s.heaterHumAmplitude = 1.2e-4;
@@ -1344,6 +2436,7 @@ inline TubeStageConfig cultureVultureInput()
     s.suppressorTieToCathode = true;
     s.suppressorDriveMix = 0.0;
     s.enableHeaterHum = true;  // boutique AC-heated unit with audible breath
+    s.gridStopperR = 10.0e3;   // moderate stopper on the distortion input
     return s;
 }
 
@@ -1360,7 +2453,8 @@ inline TubeStageConfig rndiStage()
         .outputGainLinear = 1.0,
         .enableWarmup = true, .warmupTauSeconds = 15.0,
         .enableMillerFilter = false,  // follower has low Miller
-        .sourceImpedance = 1.0e6       // Hi-Z input
+        .sourceImpedance = 1.0e6,      // Hi-Z input
+        .gridStopperR = 2.2e3          // modern DI: small grid stopper
     };
 }
 
@@ -1550,6 +2644,7 @@ inline TubeStageConfig hifi6SN7Input()
     s.enableMicrophonics = false;
     s.enableSlewLimit    = false;    // 6SN7 is fast enough that the
                                      // slew-limit isn't audible in linear
+    s.gridStopperR       = 1.0e3;    // HiFi: minimal stopper, wide open top
     return s;
 }
 
@@ -1578,6 +2673,7 @@ inline TubeStageConfig hifi6SN7Buffer()
     s.enableShotNoise    = true;
     s.shotNoiseScale     = 1.2e-6;
     s.enableMicrophonics = false;
+    s.gridStopperR       = 1.0e3;
     return s;
 }
 
@@ -1608,6 +2704,12 @@ inline TubeStageConfig hifi300BPower()
         .Cgp_miller = 12.0e-12,                 // 300B has substantial Cgp
         .sourceImpedance = 1.0e3                 // CF buffer output
     };
+    // The 300B's plate load IS the (gapped) SE output transformer: idle
+    // sits just DCR below the 350 V rail with the full standing current
+    // through the primary; Rp is the reflected speaker load the signal
+    // swings against — including above-rail flyback on the cutoff half.
+    s.plateLoadIsTransformer = true;
+    s.plateLoadDcr           = 90.0;
     // HiFi voicing on the power tube too:
     s.enableHeaterHum      = false;             // DHT 300B is well-filtered
     s.enableShotNoise      = true;
@@ -1618,6 +2720,16 @@ inline TubeStageConfig hifi300BPower()
     s.enableGridConduction = true;              // when overdriven hard,
                                                 // the 300B's grid does
                                                 // start to conduct
+    s.gridStopperR         = 1.0e3;             // DHT power triode, small
+                                                // stopper (grid-current path)
+    // Reflected LOUDSPEAKER load (docs/34 §2.5): motional resonance +
+    // voice-coil inductance make the 300B's load line frequency-dependent
+    // — the SE-amp-on-a-speaker signature the fixed resistor missed.
+    s.plateLoadReactive = true;
+    s.loadResonanceHz   = 45.0;
+    s.loadResonanceQ    = 1.2;
+    s.loadPeakRatio     = 5.0;
+    s.loadVcCornerHz    = 2000.0;
     return s;
 }
 

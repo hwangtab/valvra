@@ -124,6 +124,48 @@ TEST_CASE("HiFi 300B preset renders finite, non-trivial output",
     REQUIRE(h1 > 1.0e-5);
 }
 
+TEST_CASE("TubeAmpChain: global NFB reduces linear-region THD, keeps level",
+          "[chain][nfb]")
+{
+    // The Console preset wraps a real per-sample feedback loop around its
+    // power amp (docs/34 §2.1).  In the linear region the loop must:
+    //   1. drop the distortion products (THD ↓ by ≈ 1+T), and
+    //   2. leave the fundamental level essentially unchanged (the setup
+    //      (1+T) makeup restores what the loop suppressed).
+    const double f = 220.0;
+    const double amp = 0.05;   // low level → mostly-linear operating region
+
+    auto measure = [&](double loopGain) {
+        auto cfg = chain_presets::MarshallMode();
+        cfg.nfbLoopGain   = loopGain;
+        cfg.variationSeed = 7;
+        TubeAmpChain chain;
+        chain.setup(cfg, kSampleRate);
+        std::vector<double> out;
+        renderSine(chain, f, amp, 0.5, out);
+        std::vector<double> tail(out.end() - static_cast<long>(out.size() / 2),
+                                 out.end());
+        const double h1 = goertzelMag(tail, f, kSampleRate);
+        const double h2 = goertzelMag(tail, 2.0 * f, kSampleRate);
+        const double h3 = goertzelMag(tail, 3.0 * f, kSampleRate);
+        struct R { double h1, thd; };
+        return R { h1, (h2 + h3) / std::max(h1, 1.0e-12) };
+    };
+
+    const auto off = measure(0.0);
+    const auto on  = measure(0.6);
+
+    // 1. Fundamental level preserved within a few dB by the (1+T) makeup.
+    const double levelDb = 20.0 * std::log10(
+        std::max(on.h1, 1.0e-12) / std::max(off.h1, 1.0e-12));
+    INFO("level change with NFB = " << levelDb << " dB");
+    REQUIRE(std::abs(levelDb) < 3.0);
+
+    // 2. The loop reduces linear-region distortion.
+    INFO("THD off = " << off.thd << ", on = " << on.thd);
+    REQUIRE(on.thd < off.thd);
+}
+
 TEST_CASE("TubeAmpChain: V72 preset builds and runs without error",
           "[chain][preset]")
 {
@@ -272,10 +314,20 @@ TEST_CASE("TubeAmpChain: cold start differs measurably from steady state",
     for (int i = 0; i < int(10.0 * kSampleRate); ++i)
         chainWarm.process(0.0);
 
-    // Measure both with the same test signal.
+    // Measure both with the same LOW-LEVEL probe.  The V72 chain's
+    // makeup gain drives a +4 dBu-ish signal hard into the output
+    // transformer, where saturation regulates the level and MASKS the
+    // warmup's gm difference (the cold/warm RMS converge to <0.5% at a
+    // 0.05 probe).  A quiet probe keeps the chain in its linear region so
+    // the cold start's settling-from-0.85-gm trajectory is observable —
+    // that is the time-varying behaviour this test exists to prove, and
+    // it is large here (cold/warm differ by tens of percent).  (Earlier
+    // this passed at a hot 0.05 probe only because a grid-conduction
+    // start-up artifact, since fixed, happened to survive the
+    // saturation; the warmup effect itself lives at low level.)
     std::vector<double> outCold, outWarm;
-    renderSine(chainCold, 1000.0, 0.05, 0.2, outCold);
-    renderSine(chainWarm, 1000.0, 0.05, 0.2, outWarm);
+    renderSine(chainCold, 1000.0, 0.005, 0.2, outCold);
+    renderSine(chainWarm, 1000.0, 0.005, 0.2, outWarm);
 
     const double rmsCold = rms(outCold);
     const double rmsWarm = rms(outWarm);
@@ -283,8 +335,8 @@ TEST_CASE("TubeAmpChain: cold start differs measurably from steady state",
     REQUIRE(rmsCold > 0.0);
     REQUIRE(rmsWarm > 0.0);
 
-    // The two must differ — this is quantitative proof of time-varying
-    // thermal warmup behavior (the sensational feature competitors lack).
+    // The two must differ — quantitative proof of time-varying thermal
+    // warmup behaviour (the sensational feature competitors lack).
     const double ratio = rmsWarm / rmsCold;
     REQUIRE(std::abs(ratio - 1.0) > 0.02);  // ≥ 2% relative difference
 }
@@ -444,23 +496,28 @@ TEST_CASE("TubeAmpChain: Marshall preset keeps PSU sag enabled",
 TEST_CASE("TubeAmpChain: Console Output preset uses class-A1 push-pull power stage",
           "[chain][preset][console-output][intent]")
 {
-    // Console Output (mode index 1, formerly "Marshall") is now tuned for
+    // Console Output (mode index 1, formerly "Marshall") is tuned for
     // mix/master use: cathode bounce ON for slow envelope dynamics, and
-    // the push-pull pair biased at Vg = −25 V (class-A1 mid-rail) rather
-    // than the −36 V class-AB1 cutoff knee that the older guitar-amp
-    // voicing used.  Pushing Drive past ~2 still walks the pair into
-    // class-AB territory for users who want the British crunch on tap.
+    // the push-pull pair idling in true class-A.  With the plate load
+    // line and the tail-referenced bias convention in place, the test
+    // asserts the PHYSICAL operating point rather than a magic bias
+    // number: each side must idle at a healthy fraction of the EL34's
+    // rating (class-A = idle ≈ half the load-line maximum), and the pair
+    // must conduct on BOTH sides at the default drive.
     const auto cfg = chain_presets::MarshallMode();
     REQUIRE(cfg.stages[0].enableCathodeBounce == true);
     REQUIRE(cfg.stages[1].enableCathodeBounce == true);
     REQUIRE(cfg.usePushPullOutputStage == true);
-    // Class-A1 bias: well above the cutoff knee.  The exact value is a
-    // tuning parameter; we only assert the operating-point intent
-    // (between −20 V and −30 V puts both tubes squarely conducting).
-    REQUIRE(cfg.pushPullConfig.Vg_bias > -30.0);
-    REQUIRE(cfg.pushPullConfig.Vg_bias < -20.0);
+
+    PushPullStage pp;
+    pp.setup(cfg.pushPullConfig, kSampleRate);
+    const double idlePerSide = 0.5 * pp.restingPlateCurrent();
+    INFO("idle per side = " << idlePerSide * 1e3 << " mA");
+    REQUIRE(idlePerSide > 0.035);   // ≥ 35 mA: solidly class-A
+    REQUIRE(idlePerSide < 0.090);   // ≤ 90 mA: within EL34 dissipation
+
     // driveScale is gentler than the old guitar-amp value so default
-    // Drive=1.0 keeps the pair in class-A1.
+    // Drive=1.0 keeps music crests at or below the class-A/AB boundary.
     REQUIRE(cfg.pushPullConfig.driveScale < 25.0);
 }
 
@@ -773,8 +830,11 @@ TEST_CASE("TubeAmpChain: shared-PSU stereo coupling modulates the quiet channel"
     // R output with L loud must differ measurably from R output with L
     // silent — this is the physical L→R coupling through the shared rail.
     // Competitor plugins generally null well below −120 dB here; Valvra
-    // should be much louder than that.
-    REQUIRE(nullDb > -60.0);
+    // should be much louder than that.  With the rail-decoupling ladder
+    // in place the preamp nodes are RC-filtered from the reservoir, so
+    // the physical coupling sits in the −60…−85 dB region (real racks
+    // measure there too) rather than the legacy raw-rail −50s.
+    REQUIRE(nullDb > -85.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -854,18 +914,28 @@ TEST_CASE("TubeAmpChain: B+ ripple leaves a 120 Hz residual on silent input",
     // which is the physical mechanism that gives vintage tube gear its
     // "gritty" character when pushed.  We turn the ripple up and the
     // heater hum off to isolate the effect cleanly.
+    // With the physical reservoir PSU, ripple amplitude is EMERGENT
+    // (≈ I_load/(2f·C)) — so the regression compares a small vintage
+    // reservoir against one 20× larger.  Rail decoupling is disabled to
+    // expose the raw rail to the stages (with the ladder on, the preamp
+    // nodes filter the ripple to physically-correct near-silence, which
+    // is its own test below).
     auto cfg = chain_presets::V72Preamp();
     cfg.variationSeed = 0x1234;
+    cfg.enableRailDecoupling = false;
     for (int i = 0; i < cfg.numStages; ++i)
+    {
         cfg.stages[i].enableHeaterHum = false;
+        cfg.stages[i].enableShotNoise = false;
+    }
 
-    auto run = [&](double rippleAmp) -> std::vector<double>
+    auto run = [&](double reservoirFarads) -> std::vector<double>
     {
         auto c = cfg;
-        c.psu.ripple_amp = rippleAmp;
+        c.psu.reservoirFarads = reservoirFarads;
         TubeAmpChain chain;
         chain.setup(c, kSampleRate);
-        for (int i = 0; i < 4096; ++i) (void) chain.process(0.0);
+        for (int i = 0; i < 24000; ++i) (void) chain.process(0.0);
 
         const int N = static_cast<int>(0.5 * kSampleRate);
         std::vector<double> y;
@@ -887,22 +957,39 @@ TEST_CASE("TubeAmpChain: B+ ripple leaves a 120 Hz residual on silent input",
              / static_cast<double>(y.size());
     };
 
-    const auto yOn  = run(0.5);   // exaggerated for a crisp regression signal
-    const auto yOff = run(0.0);
+    const auto ySmall = run(8.0e-6);     // small vintage reservoir
+    const auto yBig   = run(160.0e-6);   // stiff, well-filtered rail
 
-    const double b120On  = bin(yOn,  120.0);
-    const double b120Off = bin(yOff, 120.0);
+    const double b120Small = bin(ySmall, 120.0);
+    const double b120Big   = bin(yBig,   120.0);
 
-    // Ripple path must produce a much stronger 120 Hz residual than the
-    // no-ripple path.
-    REQUIRE(b120On > 10.0 * (b120Off + 1e-12));
+    // A small reservoir must leave a much stronger 120 Hz residual.
+    REQUIRE(b120Small > 5.0 * (b120Big + 1e-12));
 
-    // And 120 Hz should dominate unrelated bins with ripple on — it's
-    // not a broadband noise floor shift, it's a tonal residual.
-    const double bSilence250 = bin(yOn, 250.0);
-    const double bSilence1k  = bin(yOn, 1000.0);
-    REQUIRE(b120On > 5.0 * bSilence250);
-    REQUIRE(b120On > 5.0 * bSilence1k);
+    // And 120 Hz should dominate unrelated bins — it's a tonal residual,
+    // not a noise-floor shift.
+    const double bSilence250 = bin(ySmall, 250.0);
+    const double bSilence1k  = bin(ySmall, 1000.0);
+    REQUIRE(b120Small > 5.0 * bSilence250);
+    REQUIRE(b120Small > 5.0 * bSilence1k);
+
+    // Rail-decoupling ladder check: with the ladder ON the preamp nodes
+    // are RC-filtered from the reservoir and the residual collapses —
+    // exactly why real preamps don't hum at the reservoir's level.
+    {
+        auto c = cfg;
+        c.enableRailDecoupling = true;
+        c.psu.reservoirFarads = 8.0e-6;
+        TubeAmpChain chain;
+        chain.setup(c, kSampleRate);
+        for (int i = 0; i < 24000; ++i) (void) chain.process(0.0);
+        const int N = static_cast<int>(0.5 * kSampleRate);
+        std::vector<double> y;
+        y.reserve(N);
+        for (int n = 0; n < N; ++n) y.push_back(chain.process(0.0));
+        const double b120Ladder = bin(y, 120.0);
+        REQUIRE(b120Ladder < 0.25 * b120Small);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -963,11 +1050,13 @@ TEST_CASE("PowerSupplySag: ripple oscillator actually modulates B+ at "
           "its configured frequency",
           "[psu][ripple])")
 {
-    // Measuring the IM sideband through the full tube chain is sensitive
-    // to Koren bias point and Miller LPF attenuation, which has made
-    // this fragile in practice.  Test the ripple generator directly —
-    // if the rail voltage itself shows a 120 Hz component, the rest of
-    // the chain will see it (and any downstream failure is elsewhere).
+    // With the physical reservoir model the rail ripple comes from the
+    // charge/discharge cycle itself, so the test drives the PSU with a
+    // realistic constant plate-current load and asserts the resulting
+    // sawtooth sits at the configured 2×line frequency.  (A sawtooth has
+    // strong low harmonics, so the dominance ratios are looser than the
+    // legacy pure-sine assertion — but 240 Hz being the 2nd harmonic of
+    // 120 Hz is itself physically expected now.)
     PSUSagParams p;
     p.Vb_nominal = 325.0;
     p.Z_internal = 200.0;
@@ -975,26 +1064,39 @@ TEST_CASE("PowerSupplySag: ripple oscillator actually modulates B+ at "
     p.sampleRate = 48000.0;
     p.ripple_amp = 2.0;
     p.ripple_freq = 120.0;
+    p.enableReservoirModel = true;
+    p.reservoirFarads = 47.0e-6;
 
     PowerSupplySag psu { p };
     psu.setRipplePhase(0.0);
 
-    // With zero plate current load, the envelope stays flat — any Vb
-    // variation is purely the ripple oscillator.
+    constexpr double kLoad = 0.02;   // 20 mA steady draw
+    for (int i = 0; i < 48000; ++i) (void) psu.process(kLoad);  // settle
+
     std::vector<double> vb;
     const int N = static_cast<int>(p.sampleRate * 0.5);
     vb.reserve(N);
     for (int i = 0; i < N; ++i) {
-        (void) psu.process(0.0);
+        (void) psu.process(kLoad);
         vb.push_back(psu.currentVb());
     }
 
+    // Hann-windowed, mean-removed DFT bins: the reservoir's slow
+    // exponential settle would otherwise leak a 1/f skirt into every
+    // low bin and swamp the comparison.
     auto bin = [&](double freq) {
+        double mean = 0.0;
+        for (double v : vb) mean += v;
+        mean /= static_cast<double>(vb.size());
         double re = 0.0, im = 0.0;
         const double w = 2.0 * std::numbers::pi * freq / p.sampleRate;
+        const double wN = std::numbers::pi
+                        / static_cast<double>(vb.size() - 1);
         for (std::size_t i = 0; i < vb.size(); ++i) {
-            re += vb[i] * std::cos(w * static_cast<double>(i));
-            im += vb[i] * std::sin(w * static_cast<double>(i));
+            const double hann = std::sin(wN * static_cast<double>(i));
+            const double v = (vb[i] - mean) * hann * hann;
+            re += v * std::cos(w * static_cast<double>(i));
+            im += v * std::sin(w * static_cast<double>(i));
         }
         return std::sqrt(re * re + im * im)
              / static_cast<double>(vb.size());
@@ -1002,13 +1104,15 @@ TEST_CASE("PowerSupplySag: ripple oscillator actually modulates B+ at "
 
     const double b120 = bin(120.0);
     const double b60  = bin(60.0);
-    const double b500 = bin(500.0);
+    const double b97  = bin(97.0);    // non-harmonic control bin
 
-    // 120 Hz bin must dominate — ripple amplitude 2.0 V / 2 = ~1.0 V
-    // peak after DFT normalization.
-    REQUIRE(b120 > 0.5);
-    REQUIRE(b120 > 20.0 * b60);
-    REQUIRE(b120 > 20.0 * b500);
+    // Fundamental of the charge/discharge sawtooth: ≈ I/(2f·C)·(1/π)
+    // scale, halved by the Hann window's coherent gain — still well
+    // above 0.15 V at 20 mA / 47 µF.
+    REQUIRE(b120 > 0.15);
+    // It must sit at 120 Hz, not at line frequency or anywhere else.
+    REQUIRE(b120 > 10.0 * b60);
+    REQUIRE(b120 > 10.0 * b97);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1070,25 +1174,25 @@ TEST_CASE("TubeAmpChain: two seeds produce different heater-hum levels "
 // to mid-band) than a quiet 50 Hz sine.  A static HPF plugin would give the
 // same attenuation at every drive level; this one shouldn't.
 // ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("TransformerStage: primary inductance saturates under heavy bass",
-          "[transformer][lf-saturation]")
+TEST_CASE("TransformerStage: flux drive makes saturation frequency-dependent",
+          "[transformer][lf-saturation][flux]")
 {
-    // Build a transformer with aggressive LF saturation and a static
-    // version for comparison.  Use an AGGRESSIVE setup so the effect
-    // exceeds the noise floor of a short DFT bin.
-    auto measure = [&](bool satOn, double driveAmp) {
+    // Core flux integrates the primary voltage (Faraday), so the SAME
+    // amplitude drives ~f_ref/f times more flux at low frequencies: a
+    // loud 50 Hz tone must compress (lose gain-per-unit-drive) far more
+    // than a loud 2 kHz tone.  A static-waveshaper transformer would
+    // show the same compression at every frequency — this is the single
+    // most characteristic behaviour of real audio iron.
+    auto gainAt = [&](double freq, double driveAmp) {
         auto cfg = transformer_presets::Marinair();
-        cfg.enablePresencePeak = false;   // isolate the LF path
-        cfg.enableLFSaturation = satOn;
-        cfg.lfSatDepth         = 0.95;
+        cfg.enablePresencePeak = false;   // isolate the core path
         cfg.drive              = 2.0;     // push core near saturation
         TransformerStage trafo;
         trafo.setup(cfg, kSampleRate);
-        // Settle HPF state.
         for (int i = 0; i < 8192; ++i) (void) trafo.process(0.0);
 
         const int N = static_cast<int>(0.25 * kSampleRate);
-        const double w = 2.0 * std::numbers::pi * 50.0 / kSampleRate;
+        const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
         double re = 0.0, im = 0.0;
         for (int n = 0; n < N; ++n)
         {
@@ -1098,24 +1202,16 @@ TEST_CASE("TransformerStage: primary inductance saturates under heavy bass",
             im += y * std::sin(w * n);
         }
         return std::sqrt(re * re + im * im)
-             / static_cast<double>(N);
+             / static_cast<double>(N) / driveAmp;
     };
 
-    // With saturation on, the 50 Hz gain at loud drive must be *smaller*
-    // (more roll-off) than the gain-per-unit-drive at a quiet level.
-    const double quietGain_on  = measure(true,  0.05) / 0.05;
-    const double loudGain_on   = measure(true,  1.0)  / 1.0;
-    const double quietGain_off = measure(false, 0.05) / 0.05;
-    const double loudGain_off  = measure(false, 1.0)  / 1.0;
+    const double comp50 = gainAt(50.0,   1.0) / gainAt(50.0,   0.02);
+    const double comp2k = gainAt(2000.0, 1.0) / gainAt(2000.0, 0.02);
 
-    // Static path: loud/quiet gain-per-drive should be similar (only
-    // JA saturation changes mid-band, not the LF corner).
-    const double staticRatio = loudGain_off / quietGain_off;
-
-    // Saturating path: loud gain-per-drive drops meaningfully below
-    // quiet — i.e. loud/quiet ratio is noticeably smaller than static.
-    const double satRatio = loudGain_on / quietGain_on;
-    REQUIRE(satRatio < 0.95 * staticRatio);
+    // Loud bass must lose noticeably more gain than loud mids.
+    REQUIRE(comp50 < 0.8 * comp2k);
+    // And the mid-band stays nearly linear at this drive.
+    REQUIRE(comp2k > 0.8);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1179,4 +1275,327 @@ TEST_CASE("TubeAmpChain: shot noise adds a seed-dependent noise floor "
     // Different seeds → different streams → different instantaneous RMS
     // (guaranteed not to match to machine precision).
     REQUIRE(std::abs(rms_on_A - rms_on_B) > 1e-7);
+}
+
+TEST_CASE("TubeAmpChain: OPT magnetizing coupling stresses tubes at LF, "
+          "not the linear calibration",
+          "[chain][magcoupling]")
+{
+    // docs/34 §2.2 — with the coupling on, the power stage genuinely
+    // sources the OPT's magnetizing current: on loud LF the plate-current
+    // modulation must rise versus coupling-off, while the small-signal
+    // 1 kHz response stays calibration-identical (the linear share is
+    // de-embedded inside the stages).
+    auto makeChain = [&](bool coupling, TubeAmpChain& chain) {
+        auto cfg = chain_presets::MarshallMode();
+        cfg.enableOPTMagCoupling = coupling;
+        cfg.variationSeed = 11;
+        chain.setup(cfg, kSampleRate);
+    };
+
+    // (a) Small-signal calibration guard at 1 kHz.
+    auto smallSignalH1 = [&](bool coupling) {
+        TubeAmpChain chain;
+        makeChain(coupling, chain);
+        std::vector<double> out;
+        renderSine(chain, 1000.0, 0.05, 0.4, out);
+        std::vector<double> tail(out.end() - static_cast<long>(out.size() / 2),
+                                 out.end());
+        return goertzelMag(tail, 1000.0, kSampleRate);
+    };
+    const double h1On  = smallSignalH1(true);
+    const double h1Off = smallSignalH1(false);
+    const double calDb = 20.0 * std::log10(
+        std::max(h1On, 1.0e-12) / std::max(h1Off, 1.0e-12));
+    INFO("1 kHz small-signal shift with coupling = " << calDb << " dB");
+    REQUIRE(std::abs(calDb) < 0.3);
+
+    // (b) Loud 50 Hz: the pair's plate-current modulation grows when the
+    //     tubes must feed the iron.
+    auto lfCurrentModulation = [&](bool coupling) {
+        TubeAmpChain chain;
+        makeChain(coupling, chain);
+        const int N = static_cast<int>(0.5 * kSampleRate);
+        double sum = 0.0, sumSq = 0.0;
+        int count = 0;
+        for (int n = 0; n < N; ++n)
+        {
+            const double t = n / kSampleRate;
+            chain.process(0.8 * std::sin(2.0 * std::numbers::pi * 50.0 * t));
+            if (n >= N / 2)
+            {
+                const double ip = chain.lastTotalIp();
+                sum += ip; sumSq += ip * ip; ++count;
+            }
+        }
+        const double mean = sum / std::max(count, 1);
+        return std::sqrt(std::max(0.0, sumSq / std::max(count, 1)
+                                        - mean * mean));
+    };
+    const double modOn  = lfCurrentModulation(true);
+    const double modOff = lfCurrentModulation(false);
+    INFO("50 Hz Ip modulation: on = " << modOn << " A, off = " << modOff);
+    REQUIRE(std::isfinite(modOn));
+    REQUIRE(modOn > modOff * 1.005);   // tubes measurably work harder
+}
+
+TEST_CASE("TubeAmpChain: HiFi SE magnetizing coupling keeps calibration and "
+          "stays stable",
+          "[chain][magcoupling][se]")
+{
+    // The 300B SE path sources its (gapped, near-linear Lundahl) OPT's
+    // magnetizing current.  Guard: small-signal response unchanged, loud
+    // LF render finite and bounded.
+    auto run = [&](bool coupling, double freq, double amp) {
+        TubeAmpChain chain;
+        auto cfg = chain_presets::HiFi300BMode();
+        cfg.enableOPTMagCoupling = coupling;
+        cfg.variationSeed = 11;
+        chain.setup(cfg, kSampleRate);
+        std::vector<double> out;
+        renderSine(chain, freq, amp, 0.4, out);
+        std::vector<double> tail(out.end() - static_cast<long>(out.size() / 2),
+                                 out.end());
+        return goertzelMag(tail, freq, kSampleRate);
+    };
+
+    const double h1On  = run(true, 1000.0, 0.05);
+    const double h1Off = run(false, 1000.0, 0.05);
+    const double calDb = 20.0 * std::log10(
+        std::max(h1On, 1.0e-12) / std::max(h1Off, 1.0e-12));
+    INFO("HiFi 1 kHz shift with SE coupling = " << calDb << " dB");
+    REQUIRE(std::abs(calDb) < 0.3);
+
+    const double lfH1 = run(true, 40.0, 0.8);
+    REQUIRE(std::isfinite(lfH1));
+    REQUIRE(lfH1 > 1.0e-4);
+    REQUIRE(lfH1 < 10.0);
+}
+
+TEST_CASE("TubeAmpChain: analytic NFB forward-gain estimate tracks the "
+          "offline probe",
+          "[chain][nfb][analytic]")
+{
+    // setup() derives the global-NFB β from estimateForwardGain() because
+    // it runs on the audio thread during rebuilds and must not render
+    // probe audio (docs/34 §2.1 review fix).  Validate the analytic
+    // estimate against the offline 5k-sample measurement probe — β only
+    // needs to land the loop gain in the right region (real amps' NFB
+    // depth varies unit-to-unit anyway), so a generous factor-2 band is
+    // the correct contract.
+    auto cfg = chain_presets::MarshallMode();
+    cfg.nfbLoopGain   = 0.0;   // measure OPEN loop
+    cfg.variationSeed = 3;
+    // The probe measures an RMS ratio at 1e-3 amplitude — silence the
+    // stages' own noise sources so the measurement is gain, not floor.
+    for (int i = 0; i < cfg.numStages; ++i)
+    {
+        cfg.stages[static_cast<std::size_t>(i)].enableShotNoise = false;
+        cfg.stages[static_cast<std::size_t>(i)].enableHeaterHum = false;
+    }
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+
+    const double aEst  = chain.estimateForwardGain();
+    const double aMeas = chain.measureForwardGain();
+    chain.reset(true);
+
+    INFO("analytic A = " << aEst << ", probed A = " << aMeas);
+    REQUIRE(std::isfinite(aEst));
+    REQUIRE(aEst > 0.0);
+    REQUIRE(aMeas > 0.0);
+    REQUIRE(aEst / aMeas > 0.5);
+    REQUIRE(aEst / aMeas < 2.0);
+}
+
+TEST_CASE("TransformerStage: distortion follows the drive source impedance",
+          "[trafo][sourcez]")
+{
+    // docs/34 §3.9 — a real transformer's THD is proportional to the
+    // impedance its magnetizing current works against.  Scaling the
+    // dynamic source impedance up must raise H3 at the same drive level,
+    // and scaling it down must lower it.
+    auto h3At = [&](double zRatio) {
+        TransformerStage t;
+        auto cfg = transformer_presets::UTC_A12();
+        cfg.drive = 1.2;    // solidly nonlinear region
+        t.setup(cfg, kSampleRate);
+        t.setRestSourceImpedance(1000.0);
+        std::vector<double> out;
+        const double f = 120.0;
+        const int N = 9600;
+        out.reserve(N);
+        for (int n = 0; n < N; ++n)
+        {
+            t.setSourceImpedance(1000.0 * zRatio);
+            const double x = 0.8 * std::sin(2.0 * std::numbers::pi * f
+                                            * n / kSampleRate);
+            out.push_back(t.process(x));
+        }
+        std::vector<double> tail(out.begin() + N / 2, out.end());
+        return goertzelMag(tail, 3.0 * f, kSampleRate);
+    };
+
+    const double h3Soft  = h3At(2.0);   // high-Z (cutoff-bound) drive
+    const double h3Rest  = h3At(1.0);
+    const double h3Stiff = h3At(0.5);   // stiff (hard-conducting) drive
+    INFO("H3: stiff=" << h3Stiff << " rest=" << h3Rest
+         << " soft=" << h3Soft);
+    REQUIRE(h3Soft > h3Rest);
+    REQUIRE(h3Rest > h3Stiff);
+}
+
+TEST_CASE("TubeAmpChain: carrySlowStateFrom survives a parameter edit",
+          "[chain][carry]")
+{
+    // docs/34 §4.3 — automating Bias/Drive rebuilds the chain; the slow
+    // state (warmup progress, thermal history) must carry over instead of
+    // cold-starting, re-based onto the new rest point.
+    auto cfg = chain_presets::V72Preamp();
+    cfg.variationSeed = 5;
+
+    TubeAmpChain chainA;
+    chainA.setup(cfg, kSampleRate);
+    std::vector<double> tmp;
+    renderSine(chainA, 220.0, 0.4, 1.0, tmp);   // 1 s: warmup advances
+    const double warmA    = chainA.stage(0).warmupProgress();
+    const double thermalA = chainA.stage(0).thermalBiasShift();
+    REQUIRE(warmA > 0.851);   // moved measurably off the 0.85 cold start
+
+    // Parameter edit: small bias shift (same topology / stage count).
+    auto cfgB = cfg;
+    cfgB.stages[0].Vg_bias += 0.05;
+    TubeAmpChain chainB;
+    chainB.setup(cfgB, kSampleRate);
+    REQUIRE(chainB.stage(0).warmupProgress() == Approx(0.85).margin(1e-9));
+
+    REQUIRE(chainB.carrySlowStateFrom(chainA));
+    REQUIRE(chainB.stage(0).warmupProgress()
+            == Approx(warmA).margin(1.0e-9));
+    REQUIRE(chainB.stage(0).thermalBiasShift()
+            == Approx(thermalA).margin(1.0e-3));
+
+    // Continues rendering finite after the carry.
+    std::vector<double> out;
+    renderSine(chainB, 220.0, 0.4, 0.1, out);
+    for (double v : out) REQUIRE(std::isfinite(v));
+
+    // Graph-shape change must refuse to carry.
+    auto cfgC = cfg;
+    cfgC.stages[0].topology = TubeTopology::CathodeFollower;
+    TubeAmpChain chainC;
+    chainC.setup(cfgC, kSampleRate);
+    REQUIRE_FALSE(chainC.carrySlowStateFrom(chainA));
+}
+
+TEST_CASE("TubeAmpChain: interstage transformer coupling is a working "
+          "topology",
+          "[chain][interstage-trafo]")
+{
+    // docs/14 — replacing the RC hand-off with interstage iron must build,
+    // stay finite/bounded, remain seed-reproducible, and audibly differ
+    // from the RC-coupled chain (the core writes its own hysteresis).
+    auto renderCfg = [&](int trafoAfter, std::vector<double>& out) {
+        auto cfg = chain_presets::V72Preamp();
+        cfg.variationSeed = 9;
+        cfg.interstageTrafoAfterStage = trafoAfter;
+        cfg.interstageTrafoConfig = transformer_presets::JensenJT11();
+        cfg.interstageTrafoConfig.drive = 0.5;
+        TubeAmpChain chain;
+        chain.setup(cfg, kSampleRate);
+        renderSine(chain, 220.0, 0.3, 0.4, out);
+    };
+
+    std::vector<double> rc, iron, iron2;
+    renderCfg(-1, rc);
+    renderCfg(0, iron);
+    renderCfg(0, iron2);
+
+    for (double v : iron) REQUIRE(std::isfinite(v));
+    REQUIRE(rms(iron) > 1.0e-4);
+    REQUIRE(rms(iron) < 10.0);
+
+    // Reproducible with the same seed.
+    for (std::size_t i = 0; i < iron.size(); ++i)
+        REQUIRE(iron[i] == Approx(iron2[i]).margin(1e-12));
+
+    // And genuinely different from the RC coupling.
+    double diffSq = 0.0, refSq = 0.0;
+    for (std::size_t i = iron.size() / 2; i < iron.size(); ++i)
+    {
+        diffSq += (iron[i] - rc[i]) * (iron[i] - rc[i]);
+        refSq  += rc[i] * rc[i];
+    }
+    REQUIRE(std::sqrt(diffSq / std::max(refSq, 1e-30)) > 0.01);
+}
+
+TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
+          "in steady state, alive on operating-point motion",
+          "[chain][voltnative]")
+{
+    // docs/34 §4.1 — the volt-native hand-off synthesises its pads from
+    // the legacy calibration product, so the STEADY-STATE response must
+    // match the normalized path within the migration gates (±0.1 dB H1,
+    // ±1 dB harmonics).  What it deliberately CHANGES: interior stages'
+    // slow operating-point wobble (sag/thermal, 0.5–7 Hz) now pumps the
+    // next grid through the coupling cap — so the recovery trajectory
+    // after a loud burst must differ measurably from the legacy path.
+    auto build = [&](bool vn, TubeAmpChain& chain) {
+        auto cfg = chain_presets::V72Preamp();
+        cfg.voltageNativeInterface = vn;
+        cfg.variationSeed = 4;
+        chain.setup(cfg, kSampleRate);
+    };
+
+    // (a) Steady-state equivalence gates.
+    auto harmonics = [&](bool vn) {
+        TubeAmpChain chain;
+        build(vn, chain);
+        std::vector<double> out;
+        renderSine(chain, 997.0, 0.15, 1.0, out);
+        std::vector<double> tail(out.end() - static_cast<long>(out.size() / 4),
+                                 out.end());
+        struct H { double h1, h2, h3; };
+        return H { goertzelMag(tail, 997.0, kSampleRate),
+                   goertzelMag(tail, 2.0 * 997.0, kSampleRate),
+                   goertzelMag(tail, 3.0 * 997.0, kSampleRate) };
+    };
+    const auto vn  = harmonics(true);
+    const auto leg = harmonics(false);
+    const double h1Db = 20.0 * std::log10(vn.h1 / std::max(leg.h1, 1e-15));
+    const double h2Db = 20.0 * std::log10(std::max(vn.h2, 1e-15)
+                                          / std::max(leg.h2, 1e-15));
+    const double h3Db = 20.0 * std::log10(std::max(vn.h3, 1e-15)
+                                          / std::max(leg.h3, 1e-15));
+    INFO("H1 shift = " << h1Db << " dB, H2 = " << h2Db
+         << " dB, H3 = " << h3Db << " dB");
+    REQUIRE(std::abs(h1Db) < 0.1);
+    REQUIRE(std::abs(h2Db) < 1.0);
+    REQUIRE(std::abs(h3Db) < 1.0);
+
+    // (b) Bias-pumping physics: loud 2 s burst, then a quiet probe — the
+    //     two modes' recovery trajectories must diverge beyond rounding
+    //     while their late steady state re-converges.
+    auto recovery = [&](bool vnFlag) {
+        TubeAmpChain chain;
+        build(vnFlag, chain);
+        std::vector<double> tmp;
+        renderSine(chain, 110.0, 0.8, 2.0, tmp);       // hot LF burst
+        std::vector<double> probe;
+        renderSine(chain, 997.0, 0.02, 0.5, probe);    // quiet probe
+        return probe;
+    };
+    const auto pVn  = recovery(true);
+    const auto pLeg = recovery(false);
+    double dEarly = 0.0, rEarly = 0.0;
+    const std::size_t early = static_cast<std::size_t>(0.25 * kSampleRate);
+    for (std::size_t i = 0; i < early; ++i)
+    {
+        dEarly += (pVn[i] - pLeg[i]) * (pVn[i] - pLeg[i]);
+        rEarly += pLeg[i] * pLeg[i];
+    }
+    const double relEarly = std::sqrt(dEarly / std::max(rEarly, 1e-30));
+    INFO("post-burst recovery divergence = " << relEarly);
+    REQUIRE(relEarly > 1.0e-3);   // the pumping path is genuinely alive
+    for (double v : pVn) REQUIRE(std::isfinite(v));
 }

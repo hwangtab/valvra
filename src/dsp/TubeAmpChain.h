@@ -72,6 +72,19 @@ public:
         daLevelEnv_ = 0.0;
     }
 
+    /// Carry the coupling network's state across a parameter-edit rebuild
+    /// (docs/34 §4.3) — the HPF delay line and DA memory keep flowing.
+    void carryStateFrom(const InterstageCoupling& o) noexcept
+    {
+        auto fin = [](double v) { return std::isfinite(v) ? v : 0.0; };
+        state_x_     = fin(o.state_x_);
+        state_y_     = fin(o.state_y_);
+        daFastState_ = fin(o.daFastState_);
+        daMidState_  = fin(o.daMidState_);
+        daSlowState_ = fin(o.daSlowState_);
+        daLevelEnv_  = fin(o.daLevelEnv_);
+    }
+
     // One-pole HPF: y[n] = α · (y[n-1] + x[n] − x[n-1]).
     // NaN-recovery: a single non-finite input would otherwise latch the
     // delay line into NaN forever.
@@ -130,56 +143,6 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Static transformer coloration — a linear high-frequency rolloff plus a
-// mild low-frequency rolloff, imitating leakage inductance + primary Lm.
-// Jiles-Atherton nonlinearity is wired separately (full TransformerStage
-// will be in Tier 2 / next step).
-//
-// fc_low  : low-frequency corner (primary inductance limit)
-// fc_high : high-frequency corner (leakage inductance limit)
-// ─────────────────────────────────────────────────────────────────────────────
-class LinearTransformerColor
-{
-public:
-    void prepare(double fc_low, double fc_high, double sampleRate) noexcept
-    {
-        // High-pass (primary Lm rolloff)
-        const double rc_low = 1.0 / (2.0 * M_PI * fc_low);
-        alpha_hp_ = rc_low / (rc_low + 1.0 / sampleRate);
-
-        // Low-pass (leakage + stray cap rolloff)
-        alpha_lp_ =
-            1.0 - std::exp(-2.0 * M_PI * fc_high / sampleRate);
-
-        reset();
-    }
-
-    void reset() noexcept
-    {
-        xhp_ = yhp_ = ylp_ = 0.0;
-    }
-
-    double process(double x) noexcept
-    {
-        // HPF
-        const double yhp = alpha_hp_ * (yhp_ + x - xhp_);
-        xhp_ = x;
-        yhp_ = yhp;
-
-        // LPF
-        ylp_ += alpha_lp_ * (yhp - ylp_);
-        return ylp_;
-    }
-
-private:
-    double alpha_hp_ {0.99};
-    double alpha_lp_ {0.1};
-    double xhp_ {0.0};
-    double yhp_ {0.0};
-    double ylp_ {0.0};
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Chain configuration: up to 4 stages + shared PSU + interstage + transformer
 // ─────────────────────────────────────────────────────────────────────────────
 enum class FeedbackVoicing
@@ -201,11 +164,40 @@ struct TubeAmpChainConfig
     PSUSagParams psu { psu_presets::k6X4_Pultec };
     bool  enablePSUSag { true };
 
+    // ─── Mains frequency (single source of truth) ───────────────────────
+    // Every mains-derived texture in one instance comes off the SAME power
+    // transformer in reality: heater-hum (1× line), rectifier ripple
+    // (2× line), and chassis leakage hum.  The engine used to carry three
+    // independent frequency fields (stage heaterFrequency = 60, psu
+    // ripple_freq = 120, and a hardcoded 60 in the processor), so a 50 Hz
+    // (EU) region could not be selected consistently.  setup() now derives
+    // the heater and ripple frequencies from this one field; the processor
+    // reads it back for its output leakage hum (docs/34 §1.5).  Per-stage /
+    // per-instance PHASE offsets stay scattered from the Monte Carlo seed —
+    // wiring differences are physical, the line frequency is not.
+    double mainsFrequencyHz { 60.0 };
+
     // Interstage coupling between stages i and i+1
     double interstageCc { 22.0e-9 };   // 22 nF
     double interstageRg { 1.0e6 };     // 1 MΩ → fc ≈ 7 Hz
     double interstageDAAmount { 0.0 };  // dielectric absorption memory
     double interstageDATau { 0.35 };    // slow recovery tail [s]
+
+    // ─── Per-stage B+ decoupling ladder (docs/03 §5, docs/04 §8) ────────
+    // Real amps never feed every stage from the raw reservoir: the rail
+    // runs through an R-C node per stage, with the INPUT stage the most
+    // filtered.  Two physical consequences the single-shared-Vb model
+    // missed: (1) preamp nodes see millivolt ripple while the output
+    // stage rides the sawtooth, (2) heavy output-stage draw sags the
+    // upstream nodes through the ladder with a ~0.5 s time constant —
+    // the stages genuinely talk to each other through the supply.
+    bool   enableRailDecoupling { true };
+    // Minimum effective dropper resistance: the per-stage droppers are
+    // auto-sized in setup() from the documented node voltages, and this
+    // floors the node time constant when a stage's calibrated drop is
+    // ~zero (direct tap — only short wiring between nodes).
+    double decouplingR { 470.0 };
+    double decouplingC { 47.0e-6 };
 
     // Analog Realism layer: weak surrounding-circuit interactions.  These
     // are profile-scaled by the processor, not user-facing per-stage knobs.
@@ -214,11 +206,56 @@ struct TubeAmpChainConfig
     double transformerLoading { 0.0 };
     FeedbackVoicing feedbackVoicing { FeedbackVoicing::Neutral };
 
+    // ─── Global negative feedback loop (docs/34 §2.1) ───────────────────
+    // Target loop gain T = β·A for a REAL per-sample feedback loop from the
+    // output-transformer node back to the chain input (1-sample loop delay
+    // = the physical propagation delay at the oversampled rate).  Unlike
+    // feedbackAmount above (a slow envelope voicing), this loop's gain
+    // collapses when the output stage clips — so the clipping knee hardens
+    // and the linear-region THD / output impedance drop by (1+T), the
+    // defining behaviour of a global-NFB power amp.  β is derived at setup
+    // from a measured forward gain and a (1+T) makeup preserves the linear
+    // level (docs/34 §5.2).  0 = no global feedback (single-ended / no-NFB
+    // voicings such as HiFi 300B, V72, RNDI, Culture Vulture).
+    double nfbLoopGain { 0.0 };
+
     // Input/output transformers — full Jiles-Atherton model
     bool                    useInputTransformer  { true };
     TransformerStageConfig  inputTrafoConfig     { transformer_presets::Marinair() };
     bool                    useOutputTransformer { true };
     TransformerStageConfig  outputTrafoConfig    { transformer_presets::Marinair() };
+
+    // ─── Voltage-native inter-stage interface (docs/34 §4.1) ────────────
+    // Carries the signal between stages in PLATE VOLTS: each RC-coupled
+    // boundary becomes  volts → coupling HPF → ×pad → next grid volts,
+    // where the pad is synthesised at setup from the SAME legacy factors
+    // (outputGainLinear·makeup·swing/normalizer) — the linear hand-off is
+    // bit-identical, but the interior stages' 0.5 Hz output trackers no
+    // longer eat the 0.5–7 Hz operating-point wobble: sag and thermal
+    // motion genuinely pump the next stage's bias through the coupling
+    // cap, as the physical circuit does.  Interstage-transformer
+    // boundaries keep the legacy normalized hand-off (the iron's drive
+    // calibration is normalized-domain).
+    bool voltageNativeInterface { true };
+
+    // ─── Interstage transformer (docs/14, docs/34 v2) ───────────────────
+    // Replaces the RC coupling at ONE stage boundary with a full JA
+    // transformer (classic interstage-iron topologies: Triad HS-52 class).
+    // The trafo's flux path provides the DC blocking; its core adds the
+    // interstage iron's own hysteresis colour.  −1 = off (default).
+    int interstageTrafoAfterStage { -1 };
+    TransformerStageConfig interstageTrafoConfig
+        { transformer_presets::JensenJT11() };
+
+    // OPT magnetizing-current → plate feedback (docs/34 §2.2).  The output
+    // transformer reports its nonlinear magnetizing-current drop each
+    // sample; the chain hands it (one sample delayed) to the driving power
+    // stage — push-pull pair or a transformer-loaded SE stage — whose plate
+    // KCL then genuinely sources the iron's demand.  Linear-regime response
+    // is de-embedded inside the stages so the OPT's calibrated insertion
+    // behaviour is preserved; what remains is the tubes' extra current
+    // draw / dissipation / sag interaction, strongest on loud LF.
+    bool enableOPTMagCoupling { true };
 
     // Optional push-pull power output stage.  When enabled, sits AFTER the
     // regular tube stages and BEFORE the output transformer — i.e. it
@@ -295,10 +332,15 @@ inline TubeAmpChainConfig V72Preamp()
     c.inputTrafoConfig.drive   = 0.5;
     c.inputTrafoConfig.H_scale = 50.0;
 
-    // Output transformer: mild coloration for classic warmth
+    // Output transformer: mild coloration for classic warmth.  Drive
+    // calibrated against the measured OPT-node level (peak ≈ 3.9 at a
+    // full-scale 1 kHz input) so the Ni-permalloy core peaks at ≈0.7·a —
+    // audible iron grip without crushing the fundamental.  The legacy
+    // value parked the core at 3.3·a, where the M/Ms-normalised output
+    // degenerated into a unity limiter.
     c.useOutputTransformer      = true;
     c.outputTrafoConfig         = transformer_presets::Marinair();
-    c.outputTrafoConfig.drive   = 0.6;
+    c.outputTrafoConfig.drive   = 0.13;
     c.outputTrafoConfig.H_scale = 60.0;
     c.outputTrafoConfig.fc_high = 16000.0;
 
@@ -331,6 +373,11 @@ inline TubeAmpChainConfig MarshallMode()
     c.stages[0]      = presets::marshallStage1();
     c.stages[1]      = presets::marshallStage2();
     c.psu            = psu_presets::kSolidState;   // SS rectifier, very low sag
+    // JCM800-class rail: the EL34 pair idles at 450 V (docs/24 §B.2); the
+    // 12AX7 nodes sit at 300 V behind their droppers via the decoupling
+    // ladder.  (Legacy fed the PP stage 325 V against a 450 V rest-point
+    // assumption — the pair never operated where the preset documented.)
+    c.psu.Vb_nominal = 450.0;
     c.enablePSUSag   = true;
     c.interstageCc   = 22.0e-9;
     c.interstageRg   = 470.0e3;
@@ -342,7 +389,10 @@ inline TubeAmpChainConfig MarshallMode()
     // transformer's nonlinear region the same way a real console's
     // power-stage transformer does.
     c.outputTrafoConfig        = transformer_presets::UTC_A12();
-    c.outputTrafoConfig.drive  = 0.55;             // gentler than guitar-amp fit
+    // Si-steel core at ≈0.7·a for the measured PP-node level (pk ≈ 3.5
+    // at full-scale input) — program-dependent mid grip, fundamental
+    // intact.  Drive ≥ 2 pushes it past 1.4·a into the crunch zone.
+    c.outputTrafoConfig.drive  = 0.23;
     c.outputTrafoConfig.H_scale = 90.0;
     c.outputTrafoConfig.fc_high = 14000.0;         // wider than a guitar amp
     // Output-level calibration for mix/master workflows.  Keep the PP and
@@ -368,11 +418,20 @@ inline TubeAmpChainConfig MarshallMode()
     c.usePushPullOutputStage = true;
     PushPullStageConfig pp;
     pp.powerTube   = params::kEL34_TriodeStrapped;
-    pp.Vg_bias     = -25.0;          // class-A1 (was −36 V class-AB1)
+    // Resting Vgk = −36 V → 55 mA/side at the 450 V rail (the EL34
+    // datasheet anchor, ≈25 W anode — true class-A idle at half the
+    // load-line maximum).  The old −25 V figure was tuned against the
+    // unsolved-plate engine; with real load-line physics it would idle
+    // the pair at 210 mA/side (≈94 W — far beyond the EL34's rating).
+    pp.Vg_bias     = -36.0;
     pp.Vp_nominal  = 450.0;
     pp.Rp_primary  = 3400.0;
     pp.Rk_tail     = 470.0;
-    pp.driveScale  = 15.0;           // gentler default (was 32)
+    // ±7 V grid at peak-1.0 input = exactly the class-A/AB boundary
+    // (one side reaches cutoff ≈ 7 V above idle): even a full-scale
+    // sine at Drive 1 stays even-harmonic-dominant, music sits inside
+    // class-A, and Drive ≥ 2 walks into the British AB crunch.
+    pp.driveScale  = 7.0;
     pp.tubeAsymmetry  = 0.03;        // matched-pair feel preserved
     pp.solveTailCoupling = true;
     pp.tailSolverIters   = 2;
@@ -398,6 +457,14 @@ inline TubeAmpChainConfig MarshallMode()
     // so this boost only fills out the linear region.
     pp.outputGainLinear = 48.0;
     c.pushPullConfig = pp;
+
+    // Global negative feedback around the power amp (docs/34 §2.1): a
+    // console/guitar power stage wraps a loop from the OPT back to the
+    // phase-splitter input.  T ≈ 0.6 (≈ 4 dB of feedback) tightens the
+    // linear region and hardens the class-AB knee — the "controlled" power
+    // amp feel — while the loop-gain collapse under clip keeps the crunch
+    // available above Drive ~2.  β and level makeup are derived at setup.
+    c.nfbLoopGain = 0.6;
 
     c.variationSeed = 0;
     return c;
@@ -428,7 +495,12 @@ inline TubeAmpChainConfig CultureVultureMode(
 
     c.useOutputTransformer     = true;
     c.outputTrafoConfig        = transformer_presets::UTC_A12();
-    c.outputTrafoConfig.drive  = 1.0;
+    // CV's 3-stage cascade lands much quieter at the OPT node (pk ≈ 0.45
+    // at full-scale): 1.6 puts the core at ≈0.7·a so the iron actually
+    // participates at the default Drive, and walks into hard saturation
+    // across the recommended 1.4–2.6 Drive range — the "analog
+    // destruction" envelope this mode is for.
+    c.outputTrafoConfig.drive  = 1.6;
     c.outputTrafoConfig.H_scale = 100.0;
     c.outputTrafoConfig.fc_high = 14000.0;
     // CV mode is intentionally extreme, but default level was too low for
@@ -459,6 +531,9 @@ inline TubeAmpChainConfig RNDIMode()
     c.useInputTransformer  = false;  // Hi-Z direct input
     c.useOutputTransformer = true;
     c.outputTrafoConfig    = transformer_presets::JensenJT11();  // wide BW, clean
+    // Jensen voicing is "clean but not sterile": core at ≈0.5·a for the
+    // measured DI-node level (pk ≈ 1.5 at full-scale input).
+    c.outputTrafoConfig.drive = 0.25;
     // Practical DI workflow level alignment.
     c.outputTrafoConfig.outputGain = 3.0;
 
@@ -480,6 +555,8 @@ inline TubeAmpChainConfig HiFi300BMode()
     c.stages[1]      = presets::hifi6SN7Buffer();
     c.stages[2]      = presets::hifi300BPower();
     c.psu            = psu_presets::kSolidState;  // HiFi: clean, regulated
+    // Rail headroom for the 300B node (350 V) plus its dropper.
+    c.psu.Vb_nominal = 360.0;
     c.enablePSUSag   = false;                     // SS-rectified, no sag
     c.interstageCc   = 220.0e-9;                  // generous LF response
     c.interstageRg   = 470.0e3;
@@ -490,11 +567,22 @@ inline TubeAmpChainConfig HiFi300BMode()
     // Drive set conservatively so the OPT stays in linear region — a
     // HiFi engineer wants the tube colour, not the trafo distortion.
     c.outputTrafoConfig         = transformer_presets::Lundahl();
-    c.outputTrafoConfig.drive   = 0.4;
+    // Amorphous core at ≈0.5·a for the measured 300B-node level (pk ≈ 7.3
+    // at full-scale input) — HiFi engineers want the tube colour, not the
+    // OPT's; the gapped-core asymmetry (H_dc below) is the audible part.
+    c.outputTrafoConfig.drive   = 0.12;
     c.outputTrafoConfig.H_scale = 30.0;
     c.outputTrafoConfig.fc_high = 30000.0;        // wider than guitar amps
-    // Gentle level lift for mastering-chain usability at moderate drive.
-    c.outputTrafoConfig.outputGain = 1.5;
+    // Single-ended OPT: the 300B's full idle current magnetizes the
+    // (gapped) core, parking it part-way up the B-H curve.  The shifted
+    // loop saturates asymmetrically — the physical source of the SE
+    // even-harmonic dominance (docs/02 §6), not a tuning trick.
+    c.outputTrafoConfig.H_dc    = 10.0;
+    // Level alignment: the OPT is now insertion-unity (the legacy deep-
+    // saturated core acted as a limiter that this gain fought against),
+    // so the trim drops below 1 to keep the chain's normalized output
+    // in mastering range at moderate drive.
+    c.outputTrafoConfig.outputGain = 0.22;
 
     c.usePushPullOutputStage = false;             // single-ended, not PP
     c.variationSeed = 0;
@@ -523,7 +611,40 @@ public:
         for (int i = 0; i < config_.numStages; ++i)
         {
             const auto idx = static_cast<std::size_t>(i);
-            stages_[idx].setup(configuredStage(i), sampleRate);
+            auto sCfg = configuredStage(i);
+
+            // Coupling-cap leakage bias drift (docs/34 §3.6): an aged
+            // paper/wax coupling cap leaks the PREVIOUS stage's plate DC
+            // onto this grid through the Rg divider, warming the bias —
+            // per-unit, era-dependent (zero on Modern populations).  The
+            // previous stage is already set up, so its solved rest plate
+            // voltage is the physically correct source.  Clamped to 40%
+            // of the bias magnitude so a wild draw shifts character, not
+            // the documented operating class.
+            if (i >= 1 && idx < variationCache_.size())
+            {
+                const double ratio =
+                    variationCache_[idx].couplingLeak_ratio;
+                if (ratio > 0.0)
+                {
+                    const double vPrev = stages_[idx - 1]
+                        .restingPlateVoltage();
+                    const double cap = 0.4 * std::abs(sCfg.Vg_bias);
+                    sCfg.Vg_bias += std::clamp(vPrev * ratio, 0.0, cap);
+                }
+            }
+
+            // Voltage-native boundary flags (docs/34 §4.1): the trafo
+            // boundary (if any) stays legacy-normalized.
+            const int trafoAt = config_.interstageTrafoAfterStage;
+            sCfg.voltageNativeOutput = config_.voltageNativeInterface
+                && i < config_.numStages - 1 && i != trafoAt;
+            sCfg.voltageNativeInput = config_.voltageNativeInterface
+                && i > 0 && (i - 1) != trafoAt;
+            stageSwingCache_[idx] = sCfg.inputVoltageSwing;
+            stageOutGainCache_[idx] = sCfg.outputGainLinear;
+
+            stages_[idx].setup(sCfg, sampleRate);
 
             // Scatter heater-hum phases from the Monte Carlo seed so no two
             // stages (and no two L/R chain instances) run in lock-step with
@@ -550,27 +671,92 @@ public:
             stages_[idx].setShotNoiseSeed(noiseBits);
         }
 
-        // Interstage couplings (between stage i and i+1)
+        // Voltage-native pads (docs/34 §4.1): one explicit attenuator per
+        // RC boundary, synthesised from the legacy calibration product so
+        // the linear hand-off is bit-identical to the normalized path.
         for (int i = 0; i < config_.numStages - 1; ++i)
         {
-            interstages_[static_cast<std::size_t>(i)]
-                .prepare(config_.interstageCc,
+            const auto idx = static_cast<std::size_t>(i);
+            interstagePads_[idx] = stageOutGainCache_[idx]
+                * stages_[idx].outputMakeupFactor()
+                * stageSwingCache_[idx + 1]
+                / stages_[idx].outputNormalizer();
+            if (! std::isfinite(interstagePads_[idx]))
+                interstagePads_[idx] = 1.0;
+        }
+
+        // Interstage couplings (between stage i and i+1).  The coupling
+        // capacitor takes its Monte Carlo film-cap tolerance — previously
+        // generated but never applied.
+        for (int i = 0; i < config_.numStages - 1; ++i)
+        {
+            const auto idx = static_cast<std::size_t>(i);
+            double ccScale = 1.0;
+            if (idx < variationCache_.size())
+                ccScale = variationCache_[idx].coupling_scale;
+            interstages_[idx]
+                .prepare(config_.interstageCc * ccScale,
                          config_.interstageRg,
                          sampleRate,
                          config_.interstageDAAmount,
                          config_.interstageDATau);
         }
 
+        // ─── Rail-decoupling ladder calibration ─────────────────────────
+        // Each stage's B+ node is fed through a dropper R + reservoir C.
+        // The droppers are auto-sized so every node RESTS exactly at the
+        // stage's documented Vp_nominal — i.e. the preset's published
+        // operating voltages become the actual steady-state node values,
+        // and sag/ripple/inter-stage coupling happen physically around
+        // them.  (Legacy: every stage was bolted to the raw PSU value,
+        // which matched no preset's documented node voltage.)
+        {
+            const double vbRest = config_.psu.Vb_nominal;
+            const double cDec = std::max(config_.decouplingC, 1.0e-9);
+            double cumI = 0.0;
+            for (int i = 0; i < config_.numStages; ++i)
+                cumI += stages_[static_cast<std::size_t>(i)]
+                            .restingPlateCurrent();
+            double nodeAbove = vbRest;
+            for (int i = config_.numStages - 1; i >= 0; --i)
+            {
+                const auto idx = static_cast<std::size_t>(i);
+                const double want = config_.stages[idx].Vp_nominal;
+                const double drop = std::max(0.0, nodeAbove - want);
+                decouplingRCalib_[idx] = (cumI > 1.0e-9)
+                    ? drop / cumI : 0.0;
+                // Node time constant from the calibrated dropper (the
+                // config floor keeps zero-drop nodes lightly filtered
+                // rather than bit-exact copies of the node above).
+                const double rEff = std::max(decouplingRCalib_[idx],
+                                             std::max(config_.decouplingR,
+                                                      10.0));
+                decouplingAlphaCalib_[idx] =
+                    1.0 - std::exp(-1.0 / (rEff * cDec * sampleRate));
+                railNodes_[idx] = std::min(nodeAbove, want);
+                nodeAbove = railNodes_[idx];
+                cumI -= stages_[idx].restingPlateCurrent();
+            }
+        }
+
         // PSU — apply chain-wide Monte Carlo to rail level, impedance,
         // and 120 Hz ripple amplitude.
         auto psu = config_.psu;
         psu.sampleRate = sampleRate;
+        // Full-wave rectifier ripple is at 2× line frequency — derive it
+        // from the single mains source so an EU (50 Hz → 100 Hz ripple) or
+        // US (60 Hz → 120 Hz) region stays coherent with the heater hum.
+        psu.ripple_freq = 2.0 * config_.mainsFrequencyHz;
         if (! variationCache_.empty())
         {
             const auto& v0 = variationCache_.front();
             psu.Vb_nominal *= v0.Vb_scale;
             psu.Z_internal *= v0.Zsupply_scale;
             psu.ripple_amp *= v0.ripple_scale;
+            // Reservoir model: the ripple spread comes from the cap's
+            // tolerance — ripple p-p goes as I/(f·C), so divide C by the
+            // same draw the legacy sine path multiplied into amplitude.
+            psu.reservoirFarads /= std::max(v0.ripple_scale, 0.2);
         }
         psu_.setParams(psu);
         psu_.reset();
@@ -585,19 +771,93 @@ public:
             * 2.0 * M_PI;
         psu_.setRipplePhase(ripplePhase);
 
+        // Push-pull output stage — opt-in.  Uses Monte Carlo perturbation
+        // from the LAST variation entry (different hash from the preamp
+        // stages) so the PP and the preamp don't co-vary identically on
+        // every reroll.  Real racks have a power section with its own
+        // tube spread independent of the preamp valves.
+        //
+        // Set up BEFORE the output transformer: the pair's resting
+        // current imbalance leaves a standing DC magnetization on the
+        // OPT core (docs/02 §6) which the transformer needs at setup.
+        if (config_.usePushPullOutputStage)
+        {
+            auto ppCfg = config_.pushPullConfig;
+            // Independent draw for the power section — real racks have a
+            // power-tube spread uncorrelated with the preamp valves (the
+            // legacy code cloned the LAST preamp stage's draw).  The raw
+            // spread is then DAMPENED ×0.4: power tubes ship factory-
+            // graded and every fixed-bias amp gets its idle re-set at
+            // install, so unit-to-unit idle varies far less than raw
+            // emission would suggest (the character spread survives in
+            // mu/gamma and the pair mismatch).
+            auto vp = makeVariation(
+                config_.variationSeed ^ 0xB5297A4D3F84D5B5ULL,
+                config_.variationDistribution);
+            vp.tube_G_scale  = 1.0 + 0.4 * (vp.tube_G_scale - 1.0);
+            vp.tube_mu_scale = 1.0 + 0.6 * (vp.tube_mu_scale - 1.0);
+            ppCfg.powerTube =
+                ::valvra::dsp::applyVariation(ppCfg.powerTube, vp);
+            const double pmDamped =
+                1.0 + 0.5 * (vp.pairMismatch_scale - 1.0);
+            ppCfg.tubeAsymmetry   *= pmDamped;
+            ppCfg.ltpTubeMismatch *= pmDamped;
+
+            // Bias adjustment: every fixed-bias amp gets its idle set to
+            // spec at install regardless of which tubes landed in the
+            // sockets (idle is exponentially sensitive to μ spread, and
+            // an untrimmed pair would swing the stage gain several dB
+            // per "unit").  Bisect Vg so the VARIED tube idles at the
+            // PRESET tube's design current; the character spread then
+            // lives where it does in hardware — curvature, mismatch,
+            // class-AB transition shape — not in raw level.
+            {
+                KorenTriode nominal { config_.pushPullConfig.powerTube };
+                KorenTriode varied  { ppCfg.powerTube };
+                auto idleAt = [&](const KorenTriode& t, double vg)
+                {
+                    const double rDc = std::max(ppCfg.dcrPrimary, 0.0);
+                    const double ul = std::clamp(ppCfg.ulTapRatio, 0.05, 1.0);
+                    const double vb = ppCfg.Vp_nominal;
+                    auto tap = [&](double vp) { return vb - ul * (vb - vp); };
+                    double vp = vb;
+                    for (int i = 0; i < 8; ++i)
+                        vp = vb
+                           - rDc * std::max(0.0, t.plateCurrent(tap(vp), vg));
+                    return std::max(0.0, t.plateCurrent(tap(vp), vg));
+                };
+                const double target =
+                    idleAt(nominal, config_.pushPullConfig.Vg_bias);
+                double lo = ppCfg.Vg_bias - 12.0;
+                double hi = ppCfg.Vg_bias + 12.0;
+                for (int i = 0; i < 40; ++i)
+                {
+                    const double mid = 0.5 * (lo + hi);
+                    if (idleAt(varied, mid) > target) hi = mid; else lo = mid;
+                }
+                ppCfg.Vg_bias = 0.5 * (lo + hi);
+            }
+            pushPull_.setup(ppCfg, sampleRate);
+        }
+
         // Transformers — full Jiles-Atherton + physical rolloffs + per-
         // instance perturbations to JA core + leakage-resonance peak.
-        auto perturbTrafo = [this](TransformerStageConfig c) {
-            if (variationCache_.empty()) return c;
-            const auto& v0 = variationCache_.front();
-            c.ja = ::valvra::dsp::applyVariation(c.ja, v0);
-            c.presence_freq    *= v0.presenceFreq_scale;
-            c.presence_gain_dB += v0.presenceGain_offset_dB;
+        // Input and output iron get INDEPENDENT draws: two different
+        // physical transformers never share their winding/core lottery.
+        auto perturbTrafo = [this](TransformerStageConfig c,
+                                   std::uint64_t saltedSeed) {
+            const auto v = makeVariation(saltedSeed,
+                                         config_.variationDistribution);
+            c.ja = ::valvra::dsp::applyVariation(c.ja, v);
+            c.presence_freq    *= v.presenceFreq_scale;
+            c.presence_gain_dB += v.presenceGain_offset_dB;
             return c;
         };
         if (config_.useInputTransformer)
         {
-            auto cfg = perturbTrafo(config_.inputTrafoConfig);
+            auto cfg = perturbTrafo(config_.inputTrafoConfig,
+                                    config_.variationSeed
+                                        ^ 0x94D049BB133111EBULL);
             const double loading = std::clamp(config_.transformerLoading, 0.0, 1.0);
             cfg.drive *= 1.0 + 0.16 * loading;
             cfg.H_scale *= 1.0 + 0.10 * loading;
@@ -607,34 +867,167 @@ public:
         }
         if (config_.useOutputTransformer)
         {
-            auto cfg = perturbTrafo(config_.outputTrafoConfig);
+            auto cfg = perturbTrafo(config_.outputTrafoConfig,
+                                    config_.variationSeed
+                                        ^ 0xBF58476D1CE4E5B9ULL);
             const double loading = std::clamp(config_.transformerLoading, 0.0, 1.0);
             cfg.drive *= 1.0 + 0.20 * loading;
             cfg.H_scale *= 1.0 + 0.12 * loading;
             cfg.fc_low *= 1.0 + 0.70 * loading;
             cfg.presence_gain_dB += 0.7 * loading;
             cfg.lfSatDepth = std::clamp(cfg.lfSatDepth + 0.22 * loading, 0.0, 1.0);
+
+            // Standing DC magnetization on the OPT core (docs/02 §6):
+            // push-pull idle imbalance leaves the differential ampere-
+            // turns of the mismatch on the primary.  Shifts the B-H loop
+            // off-centre → asymmetric saturation → the even-harmonic
+            // "punch" a real PP output section has.  (Single-ended OPTs
+            // set cfg.H_dc directly in their chain preset.)
+            if (config_.usePushPullOutputStage)
+                cfg.H_dc += 0.8 * cfg.H_scale
+                          * pushPull_.restingImbalanceRatio();
             outputTrafo_.setup(cfg, sampleRate);
         }
 
-        // Push-pull output stage — opt-in.  Uses Monte Carlo perturbation
-        // from the LAST variation entry (different hash from the preamp
-        // stages) so the PP and the preamp don't co-vary identically on
-        // every reroll.  Real racks have a power section with its own
-        // tube spread independent of the preamp valves.
-        if (config_.usePushPullOutputStage)
+        // Interstage transformer (docs/14): perturbed like the other iron,
+        // with its own independent Monte Carlo draw.
+        if (config_.interstageTrafoAfterStage >= 0
+            && config_.interstageTrafoAfterStage < config_.numStages - 1)
         {
-            auto ppCfg = config_.pushPullConfig;
-            if (! variationCache_.empty())
-            {
-                const auto& vp = variationCache_.back();
-                ppCfg.powerTube =
-                    ::valvra::dsp::applyVariation(ppCfg.powerTube, vp);
-            }
-            pushPull_.setup(ppCfg, sampleRate);
+            auto cfg = perturbTrafo(config_.interstageTrafoConfig,
+                                    config_.variationSeed
+                                        ^ 0xA24BAED4963EE407ULL);
+            interTrafo_.setup(cfg, sampleRate);
         }
+
+        // fs-normalized interaction coefficients.  The legacy constants
+        // were per-sample values tuned at 48 kHz; running the chain
+        // oversampled (×2…×16) silently shortened every interaction
+        // time constant by the same factor.
+        {
+            const double r = 48000.0 / std::max(sampleRate, 1.0);
+            auto k48 = [&](double k) { return 1.0 - std::pow(1.0 - k, r); };
+            auto p48 = [&](double a) { return std::pow(a, r); };
+            envAlpha_    = k48(0.0065);
+            slowAlpha_   = k48(0.0015);
+            memoryAlpha_ = k48(0.0025);
+            lfSigPole_   = p48(0.9975);
+            lfEnvPole_   = p48(0.997);
+            double fbLow = 0.9985, fbHigh = 0.935;
+            switch (config_.feedbackVoicing)
+            {
+                case FeedbackVoicing::Controlled:  fbLow = 0.9990; fbHigh = 0.955; break;
+                case FeedbackVoicing::LowFeedback: fbLow = 0.9978; fbHigh = 0.900; break;
+                case FeedbackVoicing::IronDamping: fbLow = 0.9993; fbHigh = 0.945; break;
+                case FeedbackVoicing::Neutral:
+                default: break;
+            }
+            fbLowPole_  = p48(fbLow);
+            fbHighPole_ = p48(fbHigh);
+            rateRatio_  = r;
+        }
+
         feedbackState_ = 0.0;
         interaction_.reset();
+
+        // ─── OPT dynamic drive impedance anchor (docs/34 §3.9) ──────────
+        // Record the rest output impedance of whatever drives the output
+        // transformer; per-sample the chain then feeds the instantaneous
+        // value so the iron's magnetizing drop follows the tube's rp — a
+        // transformer distorts more against a softer (cutoff-bound) source.
+        if (config_.useOutputTransformer)
+        {
+            const double zRest = config_.usePushPullOutputStage
+                ? pushPull_.lastOutputImpedance()
+                : (config_.numStages > 0
+                       ? stages_[static_cast<std::size_t>(
+                             config_.numStages - 1)].lastOutputImpedance()
+                       : 0.0);
+            outputTrafo_.setRestSourceImpedance(zRest);
+        }
+
+        // ─── Global NFB calibration (docs/34 §2.1) ──────────────────────
+        // Derive the open-loop forward gain A ANALYTICALLY from the built
+        // stages' rest-point calibration quantities, then pick β so the
+        // loop gain βA hits the target T and a (1+T) makeup restores the
+        // linear level.  setup() runs on the AUDIO THREAD during rebuilds
+        // (reroll / preset switch happen inside processBlock's graph-fade
+        // window), so it must never render probe audio — the original
+        // 5k-sample measurement probe was a guaranteed deadline overrun.
+        // β precision is inherently non-critical: real amps' NFB depth
+        // varies unit-to-unit by this much, and the guard test validates
+        // the analytic estimate against the offline probe.
+        nfbBeta_ = 0.0;
+        nfbMakeup_ = 1.0;
+        nfbState_ = 0.0;
+        if (config_.nfbLoopGain > 1.0e-6)
+        {
+            const double A = estimateForwardGain();
+            const double T = std::clamp(config_.nfbLoopGain, 0.0, 3.0);
+            nfbBeta_   = (A > 1.0e-6) ? T / A : 0.0;
+            nfbMakeup_ = 1.0 + T;
+        }
+    }
+
+    // Analytic open-loop forward gain (chain input → output node) from the
+    // stages' rest-point small-signal gains.  Interstage HPFs, Miller poles
+    // and the OPT's flux-path insertion are all ≈ unity in the mid band, so
+    // only the calibrated stage gains and the OPT trim enter.  Audio-thread
+    // safe: no audio is rendered.
+    double estimateForwardGain() const noexcept
+    {
+        double A = 1.0;
+        for (int i = 0; i < config_.numStages; ++i)
+            A *= stages_[static_cast<std::size_t>(i)].smallSignalGainNorm();
+        if (config_.usePushPullOutputStage)
+            A *= pushPull_.smallSignalGainNorm();
+        if (config_.useInputTransformer)
+            A *= std::abs(config_.inputTrafoConfig.outputGain);
+        if (config_.useOutputTransformer)
+            A *= std::abs(config_.outputTrafoConfig.outputGain);
+        A = std::abs(A);
+        return (std::isfinite(A) && A > 1.0e-6) ? A : 1.0;
+    }
+
+    // Measure the open-loop small-signal forward gain (chain input → output
+    // node) with a low-level 1 kHz probe.  OFFLINE / TEST USE ONLY — this
+    // renders ~5k chain samples and must never run inside an audio-thread
+    // setup(); it exists to validate estimateForwardGain() and for offline
+    // calibration checks.  The caller should reset() afterward.
+    double measureForwardGain() noexcept
+    {
+        const bool savedReroll = rerollCrossfadeActive_;
+        const bool savedExtPSU = externalPSUMode_;
+        const double savedBeta = nfbBeta_;
+        const double savedMakeup = nfbMakeup_;
+        rerollCrossfadeActive_ = false;   // single path for the probe
+        externalPSUMode_ = false;         // measure against the chain's own
+                                          // rail, not a stale injected Vb
+        nfbBeta_ = 0.0;                   // open loop
+        nfbMakeup_ = 1.0;                 // unity makeup while measuring A
+
+        const double w = 2.0 * M_PI * 1000.0 / std::max(sampleRate_, 1.0);
+        // Settle must outlast the chain's SLOW physics — the 0.5 Hz DC
+        // trackers, PSU reservoir charge-up, rail-ladder (~0.5 s) and the
+        // OPT's flux/JA settling — or the startup transient contaminates
+        // the RMS ratio (the original 1024-sample settle over-read the
+        // gain by up to ~6× on some Monte Carlo draws).  Offline use only,
+        // so the 3 s render cost is irrelevant.
+        const int kSettle = static_cast<int>(2.5 * sampleRate_);
+        const int kMeas   = static_cast<int>(0.5 * sampleRate_);
+        double inSq = 0.0, outSq = 0.0;
+        for (int n = 0; n < kSettle + kMeas; ++n)
+        {
+            const double x = 1.0e-3 * std::sin(w * static_cast<double>(n));
+            const double y = process(x);
+            if (n >= kSettle) { inSq += x * x; outSq += y * y; }
+        }
+
+        rerollCrossfadeActive_ = savedReroll;
+        externalPSUMode_ = savedExtPSU;
+        nfbBeta_ = savedBeta;
+        nfbMakeup_ = savedMakeup;
+        return (inSq > 1.0e-20) ? std::sqrt(outSq / inSq) : 1.0;
     }
 
     void reset(bool coldStart = true)
@@ -643,13 +1036,18 @@ public:
             stages_[static_cast<std::size_t>(i)].reset(coldStart);
         for (int i = 0; i < config_.numStages - 1; ++i)
             interstages_[static_cast<std::size_t>(i)].reset();
+        for (int i = 0; i < config_.numStages; ++i)
+            railNodes_[static_cast<std::size_t>(i)] =
+                config_.stages[static_cast<std::size_t>(i)].Vp_nominal;
         psu_.reset();
         inputTrafo_.reset();
         outputTrafo_.reset();
+        interTrafo_.reset();
         if (config_.usePushPullOutputStage)
             pushPull_.reset(coldStart);
         feedbackState_ = 0.0;
         interaction_.reset();
+        nfbState_ = 0.0;
     }
 
     // Re-seed Monte Carlo variation (user "Reroll" button).
@@ -675,12 +1073,23 @@ public:
             rerollFromPsu_ = psu_;
             rerollFromInputTrafo_ = inputTrafo_;
             rerollFromOutputTrafo_ = outputTrafo_;
+            rerollFromInterTrafo_ = interTrafo_;
             rerollFromPushPull_ = pushPull_;
             rerollFromFeedbackState_ = feedbackState_;
             rerollFromInteraction_ = interaction_;
+            rerollFromNfbBeta_ = nfbBeta_;
+            rerollFromNfbMakeup_ = nfbMakeup_;
+            rerollFromNfbState_ = nfbState_;
             rerollFromExternalPSUMode_ = externalPSUMode_;
             rerollFromExternalVb_ = externalVb_;
             rerollFromLastTotalIp_ = lastTotalIp_;
+            rerollFromRailNodes_ = railNodes_;
+            // The ladder calibration is re-derived by setup() for the
+            // NEW draw's resting currents; the crossfading old path must
+            // keep stepping its rail nodes with ITS droppers.
+            rerollFromDecouplingRCalib_ = decouplingRCalib_;
+            rerollFromDecouplingAlphaCalib_ = decouplingAlphaCalib_;
+            rerollFromInterstagePads_ = interstagePads_;
             rerollCrossfadeSamples_ =
                 std::max(1, static_cast<int>(0.010 * sampleRate_));
             rerollCrossfadePos_ = 0;
@@ -702,6 +1111,64 @@ public:
         externalVb_ = keepExternalVb;
     }
 
+    /// Carry the whole chain's SLOW state from its previous incarnation
+    /// after a parameter-edit rebuild (docs/34 §4.3): warmup, thermal and
+    /// magnetic history, supply charge, blocking deltas and DC trackers
+    /// survive an automated Bias/Drive move instead of cold-starting.
+    /// Returns false (carrying nothing) if the graph SHAPE changed —
+    /// different stage count / topology / power section — where old state
+    /// has no physical meaning on the new circuit.
+    bool carrySlowStateFrom(const TubeAmpChain& o) noexcept
+    {
+        
+        if (o.config_.numStages != config_.numStages) return false;
+        if (o.config_.usePushPullOutputStage
+            != config_.usePushPullOutputStage) return false;
+        for (int i = 0; i < config_.numStages; ++i)
+        {
+            const auto idx = static_cast<std::size_t>(i);
+            if (o.config_.stages[idx].topology
+                    != config_.stages[idx].topology
+                || o.config_.stages[idx].enablePentodeModel
+                    != config_.stages[idx].enablePentodeModel)
+                return false;
+        }
+
+        for (int i = 0; i < config_.numStages; ++i)
+        {
+            const auto idx = static_cast<std::size_t>(i);
+            stages_[idx].carrySlowStateFrom(o.stages_[idx]);
+        }
+        for (int i = 0; i < config_.numStages - 1; ++i)
+        {
+            const auto idx = static_cast<std::size_t>(i);
+            interstages_[idx].carryStateFrom(o.interstages_[idx]);
+        }
+        if (config_.usePushPullOutputStage)
+            pushPull_.carrySlowStateFrom(o.pushPull_);
+        if (config_.useInputTransformer && o.config_.useInputTransformer)
+            inputTrafo_.carryCoreStateFrom(o.inputTrafo_);
+        if (config_.useOutputTransformer && o.config_.useOutputTransformer)
+            outputTrafo_.carryCoreStateFrom(o.outputTrafo_);
+        if (config_.interstageTrafoAfterStage >= 0
+            && o.config_.interstageTrafoAfterStage
+                   == config_.interstageTrafoAfterStage)
+            interTrafo_.carryCoreStateFrom(o.interTrafo_);
+        psu_.carryStateFrom(o.psu_);
+        // Rail-ladder NODES are deliberately not carried: they are derived
+        // state (PSU reservoir × recalibrated droppers × draw) and a
+        // factory-load can re-target them far from the carried values —
+        // observed as a hard step under factory+reroll stress.  The sag
+        // MEMORY lives in the carried PSU reservoir; the nodes re-walk
+        // from their documented rest within the ladder's own ~0.5 s.
+        // The fast feedback / interaction states (feedbackState_, nfbState_,
+        // interaction_) are deliberately NOT carried: they settle within
+        // milliseconds anyway, and carrying them across a rebuild whose
+        // β / realism coefficients were re-derived injects a step (observed
+        // under A/B + TP-switch stress).  Slow state only.
+        return true;
+    }
+
     /// Re-arm the warmup envelope on every stage of the chain — preamp
     /// triodes plus the optional push-pull power section.  The processor
     /// calls this from the audio thread when the user clicks Warmup, so
@@ -719,19 +1186,27 @@ public:
     // One audio sample through the full chain.
     double process(double in) noexcept
     {
-        auto runPath = [](double x,
+        auto runPath = [this](double x,
                           const TubeAmpChainConfig& cfg,
                           std::array<TubeStage, TubeAmpChainConfig::kMaxStages>& stages,
                           std::array<InterstageCoupling, TubeAmpChainConfig::kMaxStages - 1>& interstages,
                           PowerSupplySag& psu,
                           TransformerStage& inputTrafo,
                           TransformerStage& outputTrafo,
+                          TransformerStage& interTrafo,
                           PushPullStage& pushPull,
                           double& feedbackState,
                           AnalogInteractionState& interaction,
                           bool externalPSUMode,
                           double externalVb,
-                          double& lastTotalIp) noexcept
+                          double& lastTotalIp,
+                          std::array<double, TubeAmpChainConfig::kMaxStages>& railNodes,
+                          const std::array<double, TubeAmpChainConfig::kMaxStages>& dropperR,
+                          const std::array<double, TubeAmpChainConfig::kMaxStages>& dropperAlpha,
+                          const std::array<double, TubeAmpChainConfig::kMaxStages - 1>& pads,
+                          double nfbBeta,
+                          double nfbMakeup,
+                          double& nfbState) noexcept
         {
             if (!std::isfinite(feedbackState))
                 feedbackState = 0.0;
@@ -753,9 +1228,19 @@ public:
               + (1.0 - feedbackLowWeight) * interaction.feedbackHigh;
             x -= feedback * feedbackComposite;
 
-            constexpr double envAlpha = 0.0065;
-            constexpr double slowAlpha = 0.0015;
-            constexpr double memoryAlpha = 0.0025;
+            // Real global NFB: subtract β × the PREVIOUS output-transformer
+            // sample (1-sample loop delay = the physical wiring/propagation
+            // delay at the oversampled rate).  Because the tap is the actual
+            // output node, the loop gain follows the forward gain — it
+            // collapses when the output stage clips, hardening the knee,
+            // and suppresses linear-region THD / Zout by (1+T).  The (1+T)
+            // makeup at the return restores the linear level (docs/34 §2.1).
+            if (nfbBeta > 0.0 && std::isfinite(nfbState))
+                x -= nfbBeta * nfbState;
+
+            const double envAlpha = envAlpha_;
+            const double slowAlpha = slowAlpha_;
+            const double memoryAlpha = memoryAlpha_;
             interaction.inputEnv += envAlpha * (std::abs(x) - interaction.inputEnv);
 
             // 1) Input transformer linear color
@@ -771,6 +1256,35 @@ public:
             else
                 Vb = cfg.psu.Vb_nominal;
 
+            // 2b) Rail-decoupling ladder: walk from the reservoir down to
+            //     the input stage.  Each node low-passes (node above −
+            //     cumulative draw × calibrated dropper R).  The input
+            //     stage ends up the most ripple-filtered and the whole
+            //     chain shares supply history — stages talk through the
+            //     rail exactly as in the physical circuit.
+            if (cfg.enableRailDecoupling && cfg.numStages > 0)
+            {
+                double prefixI[TubeAmpChainConfig::kMaxStages] = {};
+                double acc = 0.0;
+                for (int i = 0; i < cfg.numStages; ++i)
+                {
+                    acc += stages[static_cast<std::size_t>(i)].lastPlateCurrent();
+                    prefixI[i] = acc;
+                }
+                double nodeAbove = Vb;
+                for (int i = cfg.numStages - 1; i >= 0; --i)
+                {
+                    const auto idx = static_cast<std::size_t>(i);
+                    if (! std::isfinite(railNodes[idx]))
+                        railNodes[idx] = cfg.stages[idx].Vp_nominal;
+                    const double target = nodeAbove
+                        - prefixI[i] * dropperR[idx];
+                    railNodes[idx] += dropperAlpha[idx]
+                                    * (target - railNodes[idx]);
+                    nodeAbove = railNodes[idx];
+                }
+            }
+
             // 3) Cascade stages with interstage coupling.
             double stageOutput = x;
             double totalIp     = 0.0;
@@ -779,7 +1293,18 @@ public:
             for (int i = 0; i < cfg.numStages; ++i)
             {
                 const auto idx = static_cast<std::size_t>(i);
-                stageOutput = stages[idx].process(stageOutput, Vb);
+                const double VbStage =
+                    (cfg.enableRailDecoupling && std::isfinite(railNodes[idx]))
+                        ? std::max(0.0, railNodes[idx])
+                        : Vb;
+                // Hand the previous stage's instantaneous output
+                // impedance to this stage's Miller input model — the
+                // physical Z_source the grid actually sees (docs/04 §3.1).
+                if (i > 0)
+                    stages[idx].setDynamicSourceImpedance(
+                        stages[static_cast<std::size_t>(i - 1)]
+                            .lastOutputImpedance());
+                stageOutput = stages[idx].process(stageOutput, VbStage);
                 totalIp += stages[idx].lastPlateCurrent();
                 const double blockingMemory = stages[idx].blockingMemoryDrive();
                 const double thermalMemory = stages[idx].thermalMemoryDrive();
@@ -795,16 +1320,31 @@ public:
 
                 if (i < cfg.numStages - 1)
                 {
-                    const double envelopeBlocking = std::clamp(
-                        std::max(0.0, interaction.inputEnv - interaction.currentEnv),
-                        0.0, 1.0);
-                    const double blockingDrive = std::max(
-                        blockingMemory,
-                        0.45 * envelopeBlocking + 0.55 * stageMemoryDrive);
-                    stageOutput = interstages[idx].process(
-                        stageOutput,
-                        interaction.interactionDrive,
-                        blockingDrive);
+                    if (i == cfg.interstageTrafoAfterStage)
+                    {
+                        // Interstage IRON coupling (docs/14): the trafo's
+                        // flux path does the DC blocking the RC did, and
+                        // its core writes real hysteresis onto the
+                        // hand-off.
+                        stageOutput = interTrafo.process(stageOutput);
+                    }
+                    else
+                    {
+                        const double envelopeBlocking = std::clamp(
+                            std::max(0.0, interaction.inputEnv - interaction.currentEnv),
+                            0.0, 1.0);
+                        const double blockingDrive = std::max(
+                            blockingMemory,
+                            0.45 * envelopeBlocking + 0.55 * stageMemoryDrive);
+                        stageOutput = interstages[idx].process(
+                            stageOutput,
+                            interaction.interactionDrive,
+                            blockingDrive);
+                        // Voltage-native boundary: volts → HPF → explicit
+                        // pad → next grid volts (docs/34 §4.1).
+                        if (cfg.voltageNativeInterface)
+                            stageOutput *= pads[idx];
+                    }
                 }
             }
 
@@ -833,7 +1373,36 @@ public:
 
             // 6) Output transformer linear color.
             if (cfg.useOutputTransformer)
+            {
+                // Hand the driving stage's instantaneous output impedance
+                // to the OPT before it processes this sample (docs/34
+                // §3.9): tube rp modulation modulates the iron's THD.
+                outputTrafo.setSourceImpedance(
+                    cfg.usePushPullOutputStage
+                        ? pushPull.lastOutputImpedance()
+                        : (cfg.numStages > 0
+                               ? stages[static_cast<std::size_t>(
+                                     cfg.numStages - 1)].lastOutputImpedance()
+                               : 0.0));
                 stageOutput = outputTrafo.process(stageOutput);
+
+                // Feed the OPT's magnetizing-current demand back to the
+                // stage that physically drives the primary (docs/34 §2.2).
+                // One-sample delay = the same relaxation pattern as the
+                // PSU rail ladder; bounded by the stages' internal clamps.
+                if (cfg.enableOPTMagCoupling)
+                {
+                    const double dropNorm =
+                        outputTrafo.lastMagnetizingDropNorm();
+                    if (cfg.usePushPullOutputStage)
+                        pushPull.setMagnetizingDropNorm(dropNorm);
+                    else if (cfg.numStages > 0
+                             && cfg.stages[static_cast<std::size_t>(
+                                    cfg.numStages - 1)].plateLoadIsTransformer)
+                        stages[static_cast<std::size_t>(cfg.numStages - 1)]
+                            .setMagnetizingDropNorm(dropNorm);
+                }
+            }
 
             const double absOut = std::abs(stageOutput);
             double coreDrive = absOut;
@@ -853,11 +1422,12 @@ public:
             interaction.coreEnv += envAlpha * (coreDrive - interaction.coreEnv);
             interaction.coreMemoryEnv += slowAlpha
                 * (coreDrive - interaction.coreMemoryEnv);
-            interaction.lfSignal = 0.9975 * interaction.lfSignal
-                                 + 0.0025 * stageOutput;
+            interaction.lfSignal = lfSigPole_ * interaction.lfSignal
+                                 + (1.0 - lfSigPole_) * stageOutput;
             const double lfDrive = std::clamp(std::abs(interaction.lfSignal) * 2.4,
                                               0.0, 1.0);
-            interaction.lfEnv = 0.997 * interaction.lfEnv + 0.003 * lfDrive;
+            interaction.lfEnv = lfEnvPole_ * interaction.lfEnv
+                              + (1.0 - lfEnvPole_) * lfDrive;
             const double headroom = std::clamp(1.0 - absOut, 0.0, 1.0);
             interaction.headroomEnv += envAlpha * (headroom - interaction.headroomEnv);
             interaction.interactionDrive = std::clamp(
@@ -878,7 +1448,12 @@ public:
                 0.0, 1.0);
             if (phaseStrength > 1.0e-6)
             {
-                const double a = std::clamp(0.58 + 0.32 * phaseStrength, 0.35, 0.95);
+                // First-order fs re-map of the allpass pole (exact pow()
+                // would cost a transcendental per sample).
+                const double a48 = std::clamp(0.58 + 0.32 * phaseStrength,
+                                              0.35, 0.95);
+                const double a = std::clamp(
+                    1.0 - (1.0 - a48) * rateRatio_, 0.35, 0.999);
                 const double ap = -a * stageOutput
                                 + interaction.phaseLagX
                                 + a * interaction.phaseLagY;
@@ -895,26 +1470,11 @@ public:
 
             if (feedback > 1.0e-9)
             {
-                double fbLowAlpha = 0.9985;
-                double fbHighAlpha = 0.935;
-                switch (cfg.feedbackVoicing)
-                {
-                    case FeedbackVoicing::Controlled:
-                        fbLowAlpha = 0.9990;
-                        fbHighAlpha = 0.955;
-                        break;
-                    case FeedbackVoicing::LowFeedback:
-                        fbLowAlpha = 0.9978;
-                        fbHighAlpha = 0.900;
-                        break;
-                    case FeedbackVoicing::IronDamping:
-                        fbLowAlpha = 0.9993;
-                        fbHighAlpha = 0.945;
-                        break;
-                    case FeedbackVoicing::Neutral:
-                    default:
-                        break;
-                }
+                // Voicing-specific poles precomputed (fs-normalized) in
+                // setup(); cfg.feedbackVoicing matches config_ for both
+                // the live and the reroll-crossfade path.
+                const double fbLowAlpha  = fbLowPole_;
+                const double fbHighAlpha = fbHighPole_;
                 interaction.feedbackLow =
                     fbLowAlpha * interaction.feedbackLow
                     + (1.0 - fbLowAlpha) * stageOutput;
@@ -935,7 +1495,12 @@ public:
                 interaction.feedbackActivity = 0.0;
             }
 
-            return stageOutput;
+            // NFB tap: store the output node to feed back next sample
+            // (pre-makeup — the makeup is the plugin's output normalisation,
+            // not part of the feedback divider).  Apply the (1+T) makeup to
+            // the returned value to restore the level the loop suppressed.
+            nfbState = std::isfinite(stageOutput) ? stageOutput : 0.0;
+            return stageOutput * nfbMakeup;
         };
 
         const double yNew = runPath(
@@ -946,12 +1511,20 @@ public:
             psu_,
             inputTrafo_,
             outputTrafo_,
+            interTrafo_,
             pushPull_,
             feedbackState_,
             interaction_,
             externalPSUMode_,
             externalVb_,
-            lastTotalIp_);
+            lastTotalIp_,
+            railNodes_,
+            decouplingRCalib_,
+            decouplingAlphaCalib_,
+            interstagePads_,
+            nfbBeta_,
+            nfbMakeup_,
+            nfbState_);
 
         if (! rerollCrossfadeActive_)
             return yNew;
@@ -964,12 +1537,20 @@ public:
             rerollFromPsu_,
             rerollFromInputTrafo_,
             rerollFromOutputTrafo_,
+            rerollFromInterTrafo_,
             rerollFromPushPull_,
             rerollFromFeedbackState_,
             rerollFromInteraction_,
             rerollFromExternalPSUMode_,
             rerollFromExternalVb_,
-            rerollFromLastTotalIp_);
+            rerollFromLastTotalIp_,
+            rerollFromRailNodes_,
+            rerollFromDecouplingRCalib_,
+            rerollFromDecouplingAlphaCalib_,
+            rerollFromInterstagePads_,
+            rerollFromNfbBeta_,
+            rerollFromNfbMakeup_,
+            rerollFromNfbState_);
 
         const float t = static_cast<float>(rerollCrossfadePos_ + 1)
                       / static_cast<float>(std::max(1, rerollCrossfadeSamples_));
@@ -1021,6 +1602,11 @@ public:
     const TubeStage& stage(int i) const noexcept { return stages_[static_cast<std::size_t>(i)]; }
     int numStages() const noexcept { return config_.numStages; }
 
+    /// Line frequency this instance's mains-derived textures (heater hum,
+    /// rectifier ripple) run at.  The processor reads it so its output
+    /// leakage hum matches the same 50/60 Hz region (docs/34 §1.5).
+    double mainsFrequencyHz() const noexcept { return config_.mainsFrequencyHz; }
+
 private:
     // Generate one ComponentVariation per stage. We hash the chain seed with
     // the stage index so each stage gets its own independent perturbation,
@@ -1042,30 +1628,63 @@ private:
     TubeStageConfig configuredStage(int i) const
     {
         auto cfg = config_.stages[static_cast<std::size_t>(i)];
+        // Heater hum runs at the line frequency — one field for the whole
+        // instance so 50/60 Hz is consistent across heater, ripple and the
+        // processor's leakage hum (docs/34 §1.5).
+        cfg.heaterFrequency = config_.mainsFrequencyHz;
+        // Every stage that feeds another stage sees that stage's grid-leak
+        // resistor as part of its AC plate load (docs/34 §3.8).
+        cfg.nextStageLoadR = (i < config_.numStages - 1)
+            ? config_.interstageRg : 0.0;
         if (static_cast<std::size_t>(i) < variationCache_.size())
         {
             const auto& v = variationCache_[static_cast<std::size_t>(i)];
             // Apply tube + passive perturbations.
             // Use qualified name to disambiguate from member function
             // with identical base name.
-            cfg.tube  = ::valvra::dsp::applyVariation(cfg.tube, v);
+            cfg.tube    = ::valvra::dsp::applyVariation(cfg.tube, v);
+            cfg.pentode = ::valvra::dsp::applyVariation(cfg.pentode, v);
             cfg.Ck   *= v.Ck_scale;
-            cfg.Rp   *= v.Rk_scale;   // shared resistor tolerance
-            cfg.Rk   *= v.Rk_scale;
+            cfg.Rp   *= v.Rp_scale;   // independent draws — real units
+            cfg.Rk   *= v.Rk_scale;   // never correlate plate & cathode R
 
             // ─── Hidden-physics per-instance perturbations ──────────────
             // Each of the six new physical mechanisms picks up a small
             // random spread so two Valvra instances loaded on different
             // tracks / channels end up with genuinely different "mojo".
             cfg.gridLeakR         *= v.gridLeakR_scale;
-            cfg.gridCouplingC     *= v.gridCouplingC_scale;
+            // The coupling cap that FEEDS this stage IS the interstage cap
+            // between stage (i-1) and i — one physical component.  Bind the
+            // blocking-charge network to that same value AND the same Monte
+            // Carlo tolerance draw the interstage HPF uses, so a stage no
+            // longer has a different cap for its HF corner than for its
+            // blocking memory (docs/34 §1.4).  Stage 0's grid is fed by the
+            // source / input transformer, so it keeps its own input-coupling
+            // value and independent draw.
+            if (i >= 1
+                && static_cast<std::size_t>(i - 1) < variationCache_.size())
+                cfg.gridCouplingC = config_.interstageCc
+                    * variationCache_[static_cast<std::size_t>(i - 1)]
+                          .coupling_scale;
+            else
+                cfg.gridCouplingC *= v.gridCouplingC_scale;
             cfg.gridTurnOnVoltage += v.gridVon_offset;
+            cfg.warmupTauSeconds  *= v.warmupTau_scale;
             cfg.heaterHumAmplitude *= v.heaterHum_scale;
             cfg.thermalBiasSensitivity *= v.thermalSens_scale;
             cfg.slewRatePositive  *= v.slewPos_scale;
             cfg.slewRateNegative  *= v.slewNeg_scale;
             cfg.soakageAmount     *= v.soakageAmt_scale;
             cfg.soakageTau        *= v.soakageTau_scale;
+
+            // Carbon-composition excess noise (docs/34 §3.7): vintage-era
+            // plate resistors add DC-bias-proportional 1/f noise on top of
+            // the cathode-interface flicker — an additive contribution to
+            // the stage's pink ratio, zero on Modern populations.  Capped
+            // below the feel-verify micro-motion budget (docs: pumping
+            // risk past ~0.9 total).
+            cfg.flickerNoiseRatio = std::min(0.85,
+                cfg.flickerNoiseRatio + v.excessNoise_offset);
         }
         return cfg;
     }
@@ -1078,6 +1697,7 @@ private:
     PowerSupplySag   psu_ {};
     TransformerStage inputTrafo_ {};
     TransformerStage outputTrafo_ {};
+    TransformerStage interTrafo_ {};
     PushPullStage    pushPull_ {};
 
     // Click-free reroll transition: old graph state kept for a short
@@ -1088,12 +1708,19 @@ private:
     PowerSupplySag   rerollFromPsu_ {};
     TransformerStage rerollFromInputTrafo_ {};
     TransformerStage rerollFromOutputTrafo_ {};
+    TransformerStage rerollFromInterTrafo_ {};
     PushPullStage    rerollFromPushPull_ {};
     double rerollFromFeedbackState_      { 0.0 };
     AnalogInteractionState rerollFromInteraction_ {};
+    double rerollFromNfbBeta_   { 0.0 };
+    double rerollFromNfbMakeup_ { 1.0 };
+    double rerollFromNfbState_  { 0.0 };
     bool   rerollFromExternalPSUMode_ { false };
     double rerollFromExternalVb_      { 325.0 };
     double rerollFromLastTotalIp_     { 0.0 };
+    std::array<double, TubeAmpChainConfig::kMaxStages> rerollFromRailNodes_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> rerollFromDecouplingRCalib_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> rerollFromDecouplingAlphaCalib_ {};
     bool   rerollCrossfadeActive_     { false };
     int    rerollCrossfadePos_        { 0 };
     int    rerollCrossfadeSamples_    { 1 };
@@ -1107,6 +1734,36 @@ private:
     double lastTotalIp_     { 0.0 };
     double feedbackState_   { 0.0 };
     AnalogInteractionState interaction_ {};
+
+    // Global NFB loop state (docs/34 §2.1).  nfbBeta_ = β (feedback
+    // fraction, derived from the measured forward gain), nfbMakeup_ = 1+T
+    // (level restoration), nfbState_ = previous output-node sample.
+    double nfbBeta_   { 0.0 };
+    double nfbMakeup_ { 1.0 };
+    double nfbState_  { 0.0 };
+
+    // Voltage-native inter-stage pads + setup caches (docs/34 §4.1)
+    std::array<double, TubeAmpChainConfig::kMaxStages - 1> interstagePads_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> stageSwingCache_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> stageOutGainCache_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages - 1>
+        rerollFromInterstagePads_ {};
+
+    // Rail-decoupling ladder: per-stage node states + setup-calibrated
+    // dropper resistances / time constants (see setup()).
+    std::array<double, TubeAmpChainConfig::kMaxStages> railNodes_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> decouplingRCalib_ {};
+    std::array<double, TubeAmpChainConfig::kMaxStages> decouplingAlphaCalib_ {};
+
+    // fs-normalized interaction coefficients (48 kHz reference values).
+    double envAlpha_    { 0.0065 };
+    double slowAlpha_   { 0.0015 };
+    double memoryAlpha_ { 0.0025 };
+    double lfSigPole_   { 0.9975 };
+    double lfEnvPole_   { 0.997 };
+    double fbLowPole_   { 0.9985 };
+    double fbHighPole_  { 0.935 };
+    double rateRatio_   { 1.0 };
 };
 
 } // namespace valvra::dsp

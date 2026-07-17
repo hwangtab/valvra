@@ -47,6 +47,8 @@ public:
         const double fc = 7000.0; // tame HF fizz on residual branch
         residualAlpha_ = 1.0 - std::exp(-2.0 * 3.14159265358979323846
                                         * fc / std::max(sampleRate, 1.0));
+        dcAlpha_ = 1.0 - std::exp(-2.0 * 3.14159265358979323846
+                                  * 5.0 / std::max(sampleRate, 1.0));
         reset();
     }
 
@@ -101,6 +103,7 @@ public:
         prevPhys_ = 0.0;
         prevOut_ = 0.0;
         residualLP_ = 0.0;
+        dcState_ = 0.0;
 #if defined(VALVRA_USE_RTNEURAL) && VALVRA_USE_RTNEURAL
         if (rtModelLoaded_)
             rtModel_.reset();
@@ -180,7 +183,16 @@ public:
 
         // Cap residual contribution to keep headroom behavior predictable.
         const double shapedResidual = std::clamp(residualLP_, -0.35, 0.35);
-        const double hybrid = physicsOut + shapedResidual;
+
+        // DC-block the residual branch: the MLP biases (and any loaded
+        // model) emit a constant offset on silence (≈ −50 dBFS measured)
+        // — a real residual path would be capacitor-coupled.  One-pole
+        // highpass at ~5 Hz, applied to the residual only so the physics
+        // branch's own DC behaviour is untouched.
+        dcState_ += dcAlpha_ * (shapedResidual - dcState_);
+        const double residualAC = shapedResidual - dcState_;
+
+        const double hybrid = physicsOut + residualAC;
         const double out = physicsOut + b * (hybrid - physicsOut);
 
         prevIn_ = input;
@@ -201,6 +213,8 @@ private:
     double b2_ { 0.0 };
 
     double residualAlpha_ { 0.4 };
+    double dcAlpha_ { 0.0007 };   ///< ~5 Hz residual-branch coupling cap
+    double dcState_ { 0.0 };
     double prevIn_ { 0.0 };
     double prevPhys_ { 0.0 };
     double prevOut_ { 0.0 };

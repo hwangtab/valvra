@@ -89,14 +89,23 @@ public:
         prepare();
     }
 
-    // Design filters sized for the requested factor.  Larger factors need
-    // longer filters to stay below −90 dB in the stop-band.
+    // Design filters sized for the requested factor.  The legacy design
+    // reused one 65-tap filter for every factor; since a Kaiser FIR has a
+    // FIXED transition width in cycles/sample, at 4×+ that transition
+    // band swallowed the audio top octave (−0.95 dB @ 18 kHz at 4×,
+    // −2.2 dB @ 10 kHz at 16×) and left content just above base Nyquist
+    // attenuated only ~10 dB before folding.  Scaling taps ∝ Factor
+    // keeps the transition width CONSTANT in absolute Hz: passband to
+    // ~19.7 kHz within 0.1 dB and ≥90 dB at base Nyquist, every factor.
     void prepare()
     {
-        // 65-tap Kaiser @ β=8.6 → ≈ 90 dB stop-band attenuation.
-        constexpr double kBeta = 8.6;
+        constexpr double kBeta = 8.6;   // ≈ 90 dB Kaiser stop-band
 
-        const double cutoff = 0.5 / static_cast<double>(Factor);
+        // Centre the transition band just below base Nyquist so the
+        // stop edge lands AT base Nyquist (no aliasable gap).  The
+        // Kaiser main-lobe transition width is ≈ 5.71/kTaps cycles/sample.
+        const double dNu    = 5.71 / static_cast<double>(kTaps);
+        const double cutoff = 0.5 / static_cast<double>(Factor) - 0.5 * dNu;
 
         // Up-sampling path: filter gain = Factor to compensate for zero-stuff loss
         auto h_up = kaiserLowpass(kTaps, cutoff, kBeta);
@@ -123,9 +132,12 @@ public:
     }
 
     // Upsample one input sample to `Factor` output samples.
-    // Uses zero-stuffing + FIR convolution (straightforward; polyphase
-    // decomposition could halve the multiplies but would complicate the
-    // API — at 4× / 65-tap the cost is negligible on modern CPUs).
+    // TRUE polyphase decomposition: the zero-stuffed stream is nonzero
+    // only every Factor-th tap, so output phase p needs only the taps
+    // h[p + k·Factor] against the BASE-rate input history — kTaps
+    // multiplies total per base sample instead of kTaps·Factor.  With
+    // the factor-scaled filter lengths this keeps the upsampler's cost
+    // constant across factors.
     std::array<double, Factor> upsample(double x) noexcept
     {
         // NaN-recovery: a non-finite input would permanently poison the FIR
@@ -133,23 +145,18 @@ public:
         if (! std::isfinite(x)) x = 0.0;
         std::array<double, Factor> out {};
 
-        // Insert x followed by (Factor-1) zeros into the circular buffer
-        // at "virtual" positions representing the upsampled stream.
-        // Apply the FIR convolution for each of the Factor output samples.
+        bufferUp_[static_cast<std::size_t>(writeIdx_up_)] = x;
+        const int newest = writeIdx_up_;
+        writeIdx_up_ = (writeIdx_up_ + 1) & kMask;
+
+        const int N = static_cast<int>(coeffs_up_.size());
         for (int phase = 0; phase < Factor; ++phase)
         {
-            // Push either x (phase 0) or zero for subsequent phases
-            bufferUp_[static_cast<std::size_t>(writeIdx_up_)] =
-                (phase == 0) ? x : 0.0;
-            writeIdx_up_ = (writeIdx_up_ + 1) & kMask;
-
-            // Convolve
             double sum = 0.0;
-            int idx = (writeIdx_up_ - 1) & kMask;
-            const int N = static_cast<int>(coeffs_up_.size());
-            for (int k = 0; k < N; ++k)
+            int idx = newest;
+            for (int j = phase; j < N; j += Factor)
             {
-                sum += coeffs_up_[static_cast<std::size_t>(k)] *
+                sum += coeffs_up_[static_cast<std::size_t>(j)] *
                        bufferUp_[static_cast<std::size_t>(idx)];
                 idx = (idx - 1) & kMask;
             }
@@ -171,18 +178,31 @@ public:
                 std::isfinite(s) ? s : 0.0;
             writeIdx_down_ = (writeIdx_down_ + 1) & kMask;
 
-            // On the final sub-sample of each input cycle, compute the output
+            // On the final sub-sample of each input cycle, compute the output.
+            // The decimation filter is linear-phase (symmetric taps,
+            // h[k] = h[N−1−k]), so fold the convolution into pairs:
+            //   Σ h[k]·(x[k] + x[N−1−k])  for k < N/2  (+ centre tap).
+            // kTaps = 64·Factor+1 is always odd, so there is exactly one
+            // centre tap.  This halves the per-output-sample multiply count
+            // of the full-length decimation convolution — the heaviest FIR
+            // in the round trip — with a bit-exact result.
             if (phase == Factor - 1)
             {
-                double sum = 0.0;
-                int idx = (writeIdx_down_ - 1) & kMask;
                 const int N = static_cast<int>(coeffs_down_.size());
-                for (int k = 0; k < N; ++k)
+                const int newest = (writeIdx_down_ - 1) & kMask;
+                const int half = N / 2;   // N odd → half = (N−1)/2
+                double sum = 0.0;
+                for (int k = 0; k < half; ++k)
                 {
-                    sum += coeffs_down_[static_cast<std::size_t>(k)] *
-                           bufferDown_[static_cast<std::size_t>(idx)];
-                    idx = (idx - 1) & kMask;
+                    const int i1 = (newest - k) & kMask;
+                    const int i2 = (newest - (N - 1 - k)) & kMask;
+                    sum += coeffs_down_[static_cast<std::size_t>(k)]
+                         * (bufferDown_[static_cast<std::size_t>(i1)]
+                          + bufferDown_[static_cast<std::size_t>(i2)]);
                 }
+                const int ic = (newest - half) & kMask;
+                sum += coeffs_down_[static_cast<std::size_t>(half)]
+                     * bufferDown_[static_cast<std::size_t>(ic)];
                 out = sum;
             }
         }
@@ -191,27 +211,34 @@ public:
 
     static constexpr int factor() noexcept { return Factor; }
 
-    // FIR tap count (shared by prepare()).
-    static constexpr int kTaps = 65;
+    // FIR tap count: 64·Factor + 1.  Odd (linear phase, integer group
+    // delay), and the constant absolute transition width makes the
+    // round-trip base-rate latency IDENTICAL (63 samples) at every
+    // factor — switching oversampling quality no longer moves PDC.
+    static constexpr int kTaps = 64 * Factor + 1;
 
     // Round-trip (up + down) latency, expressed in *base-rate* samples.
     //
-    // Each 65-tap linear-phase FIR has group delay (kTaps-1)/2 = 32 at the
-    // upsampled rate; two of them in series = 64 upsampled samples.  The
-    // downsampler only emits its output on the final phase of each base
-    // sample, and its internal convolution reads from the just-written
-    // position — so the effective base-rate argmax of the impulse response
-    // lands at `kTaps/Factor − 1` rather than the naive `(kTaps−1)/Factor`.
-    // See test_polyphase_oversampler.cpp "reported latency matches measured
-    // group delay" for the empirical verification.
+    // Each linear-phase FIR has group delay (kTaps−1)/2 at the upsampled
+    // rate; two in series = (kTaps−1) upsampled samples.  The downsampler
+    // emits its output on the final phase of each base sample and its
+    // convolution reads from the just-written position, which advances
+    // the alignment by one base sample — hence the −1.  Verified by
+    // test_polyphase_oversampler.cpp "reported latency matches measured
+    // group delay".
     static constexpr int latencyInBaseSamples() noexcept
     {
-        return kTaps / Factor - 1;  // 65/2-1=31, 65/4-1=15, 65/8-1=7
+        return (kTaps - 1) / Factor - 1;  // = 63 for every factor
     }
 
 private:
-    // Circular buffer size: next power of 2 ≥ filter length (65 taps → 128).
-    static constexpr std::size_t kBufferSize = 128;
+    // Circular buffer size: next power of 2 ≥ filter length.
+    static constexpr std::size_t kBufferSize = []
+    {
+        std::size_t s = 1;
+        while (s < static_cast<std::size_t>(kTaps)) s <<= 1;
+        return s;
+    }();
     static constexpr int kMask = static_cast<int>(kBufferSize - 1);
 
     std::vector<double> coeffs_up_;

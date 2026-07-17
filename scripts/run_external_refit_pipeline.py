@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,7 @@ def bootstrap_external_from_internal(dataset_dir: Path,
         internal = ROOT / "artifacts" / f"{mode}_fit_dataset_v1.npz"
         run_cmd(
             [
-                "python3", str(FIT_SCRIPT),
+                sys.executable, str(FIT_SCRIPT),
                 "dataset",
                 "--mode", mode,
                 "--output", str(internal),
@@ -97,7 +98,7 @@ def main() -> int:
 
     run_cmd(
         [
-            "python3", str(FIT_SCRIPT),
+            sys.executable, str(FIT_SCRIPT),
             "validate-external",
             "--dataset-dir", str(dataset_dir),
             "--pattern", args.pattern,
@@ -107,7 +108,7 @@ def main() -> int:
 
     run_cmd(
         [
-            "python3", str(FIT_SCRIPT),
+            sys.executable, str(FIT_SCRIPT),
             "refit-external",
             "--dataset-dir", str(dataset_dir),
             "--pattern", args.pattern,
@@ -121,7 +122,7 @@ def main() -> int:
 
     run_cmd(
         [
-            "python3", str(FIT_SCRIPT),
+            sys.executable, str(FIT_SCRIPT),
             "verify-batch",
             "--dataset-dir", str(dataset_dir),
             "--dataset-pattern", args.pattern,
@@ -132,7 +133,7 @@ def main() -> int:
         ]
     )
 
-    run_cmd(["python3", str(REPORT_SCRIPT)])
+    run_cmd([sys.executable, str(REPORT_SCRIPT)])
 
     verify_payload = {}
     verify_path = Path(args.verify_json)

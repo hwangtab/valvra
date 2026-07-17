@@ -616,12 +616,23 @@ TubeAmpChainConfig buildConfig(const CliOptions& o)
     for (int i = 0; i < cfg.numStages; ++i)
         cfg.stages[i].inputVoltageSwing *= effDrive;
 
-    // Transformer override
+    // Transformer override — swap the IRON, keep the chain's calibration
+    // (drive/H_scale/outputGain set the core excursion and insertion trim
+    // for this node's level; H_dc carries the circuit's standing
+    // magnetization).  Wholesale preset replacement was measured to jump
+    // levels by >10 dB and over-excite the core ~8x.
     auto setTrafo = [](TransformerStageConfig& t, const std::string& name){
-        if      (name == "marinair") t = transformer_presets::Marinair();
-        else if (name == "utc")      t = transformer_presets::UTC_A12();
-        else if (name == "jensen")   t = transformer_presets::JensenJT11();
-        else if (name == "lundahl")  t = transformer_presets::Lundahl();
+        auto stock = t;
+        if      (name == "marinair") stock = transformer_presets::Marinair();
+        else if (name == "utc")      stock = transformer_presets::UTC_A12();
+        else if (name == "jensen")   stock = transformer_presets::JensenJT11();
+        else if (name == "lundahl")  stock = transformer_presets::Lundahl();
+        else return;
+        stock.drive      = t.drive;
+        stock.H_scale    = t.H_scale;
+        stock.outputGain = t.outputGain;
+        stock.H_dc       = t.H_dc;
+        t = stock;
     };
     if (o.transformer != "auto")
     {
@@ -762,6 +773,15 @@ int runWavFile(const CliOptions& opts)
         e.setMode(parseExpansionMode(opts.expansion));
         e.setAmount(opts.expansionAmount);
         e.setMix(opts.expansionMix);
+        // Same per-instance lottery as the plugin (PluginProcessor.cpp)
+        // so a CLI render with --seed=N matches the plugin instance, and
+        // the readiness/feel artifacts certify varied units, not just
+        // the nominal one.
+        const auto vx = makeVariation(
+            opts.seed ^ 0xD6E8FEB86659FD93ULL,
+            VariationDistribution::Modern);
+        e.setVariation(vx.tapeCoreK_scale, vx.tapeWow_scale,
+                       vx.optoMemoryTau_scale);
     }
 
     int warmup = 0;
@@ -920,6 +940,14 @@ int main(int argc, char** argv)
     expansion.setMode(parseExpansionMode(opts.expansion));
     expansion.setAmount(opts.expansionAmount);
     expansion.setMix(opts.expansionMix);
+    {
+        // Per-instance lottery, matching the plugin (see WAV path above).
+        const auto vx = makeVariation(
+            opts.seed ^ 0xD6E8FEB86659FD93ULL,
+            VariationDistribution::Modern);
+        expansion.setVariation(vx.tapeCoreK_scale, vx.tapeWow_scale,
+                               vx.optoMemoryTau_scale);
+    }
 
     int warmupSamples = 0;
     if (! warmupSamplesFrom(opts.warmupSec, opts.sampleRate, warmupSamples, err))

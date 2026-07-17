@@ -260,6 +260,30 @@ int targetReasonCodeFor(float inputRmsDb,
     return 0;
 }
 
+// Output safety soft-clip used only when the true-peak limiter is not
+// engaged (bypass / null-test / TP Off-or-Soft).  Identity below ±T,
+// smooth compression above it asymptoting to ±K, C1-continuous at the
+// knee (value and unit slope match), so it is bit-transparent for any
+// musical level yet bounds a pathological transient without a step.
+inline float softSafetyClip(float x) noexcept
+{
+    // Linear (bit-identity) below ±T = ±1.0 (full scale) and a smooth,
+    // C1-continuous compression above it toward the ±K (+6 dBFS)
+    // asymptote.  This is only ever called inside the transition-gated
+    // hold window in processBlock() — never in steady state — so the
+    // tight knee bounds a transition transient (limiter ring-drain, A/B
+    // rebuild spike) hard enough to keep the step small, while leaving
+    // the steady limiter-off reference path completely untouched (the
+    // gate keeps it off there) and a true-bypass dry term (≤ full scale)
+    // bit-exact (identity below the knee).
+    constexpr float T = 1.0f;
+    constexpr float K = 2.0f;
+    const float a = std::abs(x);
+    if (a <= T) return x;
+    const float over = (a - T) / (K - T);
+    return std::copysign(T + (K - T) * std::tanh(over), x);
+}
+
 dsp::TransformerStageConfig transformerConfigForChoice(int choice)
 {
     switch (choice)
@@ -272,6 +296,25 @@ dsp::TransformerStageConfig transformerConfigForChoice(int choice)
         case 1:
         default: return dsp::transformer_presets::Marinair();
     }
+}
+
+// Swap a chain transformer's IRON (core material, bandwidth, presence
+// peak) while keeping the CHAIN's calibration: drive/H_scale/outputGain
+// set the core excursion and insertion trim for the node level at this
+// position in this preset, and H_dc carries the standing magnetization
+// of the surrounding circuit (SE idle current, PP imbalance).  Wholesale
+// replacement with the stock preset (drive = 1.0, outputGain = 1.0,
+// H_dc = 0) was measured to jump the HiFi output by +13 dB and push
+// cores ~8x past their calibrated excursion.
+dsp::TransformerStageConfig transformerOverrideKeepingCalibration(
+    int choice, const dsp::TransformerStageConfig& calibrated)
+{
+    auto cfg = transformerConfigForChoice(choice);
+    cfg.drive      = calibrated.drive;
+    cfg.H_scale    = calibrated.H_scale;
+    cfg.outputGain = calibrated.outputGain;
+    cfg.H_dc       = calibrated.H_dc;
+    return cfg;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1069,6 +1112,15 @@ void ValvraProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         *params_.getRawParameterValue(kParamTpMode));
     tpLimiter_.setBypass(tpModeAtPrepare != 2);
 
+    // Seed the safety-clip gate to the initial limiter-bypass state so the
+    // first processed block is NOT seen as a transition (which would arm
+    // the clip and perturb a steady limiter-off reference render).
+    lastLimiterBypassed_ =
+        (tpModeAtPrepare != 2)
+        || nullTestMode_.load(std::memory_order_relaxed)
+        || (bypassParam_ != nullptr && bypassParam_->get());
+    safetyHoldSamples_ = 0;
+
     // Seed dither RNG once at prepare so independent instances do not emit
     // identical noise streams (would otherwise sum coherently in a mix bus).
     ditherRng_ ^=
@@ -1285,7 +1337,8 @@ void ValvraProcessor::rebuildChain()
         else if (inputChoice >= 2)
         {
             cfg.useInputTransformer = true;
-            cfg.inputTrafoConfig = transformerConfigForChoice(inputChoice);
+            cfg.inputTrafoConfig = transformerOverrideKeepingCalibration(
+                inputChoice, cfg.inputTrafoConfig);
         }
 
         const int outputChoice = static_cast<int>(
@@ -1295,7 +1348,8 @@ void ValvraProcessor::rebuildChain()
         else if (outputChoice >= 2)
         {
             cfg.useOutputTransformer = true;
-            cfg.outputTrafoConfig = transformerConfigForChoice(outputChoice);
+            cfg.outputTrafoConfig = transformerOverrideKeepingCalibration(
+                outputChoice, cfg.outputTrafoConfig);
         }
     };
 
@@ -1368,8 +1422,48 @@ void ValvraProcessor::rebuildChain()
     applyRealism(cfgL);
     applyRealism(cfgR);
 
-    chainL_.setup(cfgL, internalSR);
-    chainR_.setup(cfgR, internalSR);
+    // Slow-state carry-over (docs/34 §4.3): if this rebuild is a pure
+    // parameter edit — same preset, seed, internal rate and routing — the
+    // running chains' warmup/thermal/magnetic/supply history is re-based
+    // onto the new operating points instead of cold-starting.  Reroll,
+    // preset, OS and M/S changes intentionally do NOT carry (a different
+    // unit / a different circuit has no claim on the old state; reroll
+    // continuity is handled by its own crossfade).  The pre-setup copies
+    // are value snapshots, same practice as the reroll crossfade path.
+    const bool canCarry = carryLastPreset_ == currentPresetIndex_
+        && carryLastSeed_ == seed
+        && carryLastSR_ == internalSR
+        && carryLastMs_ == msMode;
+    if (canCarry)
+    {
+        const dsp::TubeAmpChain prevL = chainL_;
+        const dsp::TubeAmpChain prevR = chainR_;
+        chainL_.setup(cfgL, internalSR);
+        chainR_.setup(cfgR, internalSR);
+        chainL_.carrySlowStateFrom(prevL);
+        chainR_.carrySlowStateFrom(prevR);
+    }
+    else
+    {
+        chainL_.setup(cfgL, internalSR);
+        chainR_.setup(cfgR, internalSR);
+    }
+    carryLastPreset_ = currentPresetIndex_;
+    carryLastSeed_   = seed;
+    carryLastSR_     = internalSR;
+    carryLastMs_     = msMode;
+
+    // Expansion engines roll their own per-instance lottery off the same
+    // seed (tape oxide pinning, transport wow depth, T4 trap-level τ) —
+    // without this every instance's tape/opto "unit" was identical.
+    {
+        const auto vx = dsp::makeVariation(
+            cfgL.variationSeed ^ 0xD6E8FEB86659FD93ULL,
+            cfgL.variationDistribution);
+        expansionRack_.setVariation(vx.tapeCoreK_scale,
+                                    vx.tapeWow_scale,
+                                    vx.optoMemoryTau_scale);
+    }
 
     // Shared-rail coupling: one PowerSupplySag per processor drives BOTH
     // chains.  Enable it only when the preset itself has sag on (solid-
@@ -1485,7 +1579,13 @@ int ValvraProcessor::currentLatencyInSamples() const noexcept
         case 16: osLat = dsp::PolyphaseOversampler<16>::latencyInBaseSamples(); break;
         default: osLat = 0; break;
     }
-    return osLat + tpLimiter_.currentLatencyInSamples();
+    // The expansion rack has a fixed, mode-invariant latency (its tape
+    // path's 2× FIR round trip; the other modes ride a matching delay
+    // ring — docs/34 §4.2).  It sits in the wet path BEFORE the mix, so
+    // like the OS latency it is absorbed by the dry-alignment delay and
+    // never flips PDC on a mode change.
+    return osLat + dsp::ExpansionRack::latencyInBaseSamples()
+         + tpLimiter_.currentLatencyInSamples();
 }
 
 bool ValvraProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -1875,6 +1975,7 @@ void ValvraProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             continue;
         }
 
+
         const float trimL = dryL * inputTrimGain;
         const float trimR = dryR * inputTrimGain;
         inputEnergy += static_cast<double>(trimL) * trimL;
@@ -2054,8 +2155,13 @@ void ValvraProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                 outR += srcL * crossGain;
             }
 
+            // Output leakage hum runs at the same line frequency as the
+            // chain's heater / rectifier textures (docs/34 §1.5) — one
+            // 50/60 Hz source for the whole instance instead of a hardcoded
+            // 60 Hz that contradicted a 50 Hz-configured chain.
+            const double mainsHz = std::max(1.0, chainL_.mainsFrequencyHz());
             const double humInc = juce::MathConstants<double>::twoPi
-                                * 60.0 / std::max(sampleRate_, 1.0);
+                                * mainsHz / std::max(sampleRate_, 1.0);
             realismHumPhaseL_ += humInc;
             realismHumPhaseR_ += humInc * 1.003;
             if (realismHumPhaseL_ >= juce::MathConstants<double>::twoPi)
@@ -2360,6 +2466,12 @@ void ValvraProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
     tpLimiter_.setCeilingDb(
         *params_.getRawParameterValue(kParamTpCeilingDb));
+    // The brick-wall limiter is OFF during host bypass: a true bypass
+    // must be bit-exact, and a look-ahead limiter would otherwise
+    // pre-duck the dry signal in anticipation of the active-period tail
+    // still in its delay pipeline (breaking transparency).  The wet
+    // path's own safety clamp (in the per-sample loop, applied only
+    // while bypassing) bounds the crossfade leak instead.
     tpLimiter_.setBypass((! tpBrickwall) || nullTest || bypass);
 
     tpLimiter_.process(L, stereo ? R : nullptr, numSamples);
@@ -2374,6 +2486,47 @@ void ValvraProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             L[n] = safeCeiling * std::tanh(L[n] / safeCeiling);
             if (stereo)
                 R[n] = safeCeiling * std::tanh(R[n] / safeCeiling);
+        }
+    }
+
+    // Final output safety soft-clip — engaged ONLY across a transition,
+    // never in steady state.  When the brick-wall limiter is toggled OFF
+    // (host bypass / TP Off-or-Soft) its look-ahead delay ring drains the
+    // PRE-limit mix it was still holding, and an A/B snapshot swap exposes
+    // the rebuilding chain's settling spike — either of which, on a hot
+    // chain, can momentarily exceed full scale and (worse) step the
+    // output.  softSafetyClip bounds those smoothly.  It is gated to a
+    // short hold window after any limiter-mode change / graph-rebuild
+    // fade / bypass crossfade so steady processing (and the bit-exact
+    // limiter-off reference path) is never touched: it is identity below
+    // ±1 (full scale) anyway, and the gating then guarantees zero effect
+    // on stable output even for a legitimate in-spec peak above 0 dBFS.
+    const bool limiterBypassedThisBlock =
+        (tpMode != 2) || nullTest || bypass;
+    if (limiterBypassedThisBlock != lastLimiterBypassed_
+        || graphFadePhase_ != GraphFadePhase::Idle
+        || bypassBlendSmooth_.isSmoothing())
+    {
+        // Hold long enough to cover BOTH the limiter look-ahead ring
+        // drain AND a graph-rebuild/A-B-swap settling transient.  Counted
+        // in SAMPLES (not blocks) so a small host buffer can't leave part
+        // of it unclipped — floored at the max possible lookahead so the
+        // floor holds regardless of the current TP latency, plus two
+        // blocks of settle margin.  Re-armed every block while a
+        // fade/crossfade is still running.
+        safetyHoldSamples_ =
+            std::max(tpLimiter_.currentLatencyInSamples(),
+                     dsp::TruePeakLimiter::kMaxLookaheadSamples)
+            + 2 * numSamples;
+    }
+    lastLimiterBypassed_ = limiterBypassedThisBlock;
+    if (safetyHoldSamples_ > 0)
+    {
+        safetyHoldSamples_ -= numSamples;
+        for (int n = 0; n < numSamples; ++n)
+        {
+            L[n] = softSafetyClip(L[n]);
+            if (stereo) R[n] = softSafetyClip(R[n]);
         }
     }
 

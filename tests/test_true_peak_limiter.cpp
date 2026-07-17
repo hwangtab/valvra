@@ -9,12 +9,16 @@
 //   3) Above ceiling, the limiter holds the output below the ceiling with
 //      a small over-shoot tolerance (≤ 0.5 dB on transient material per
 //      ITU-R BS.1770-5 4× detection accuracy).
+//   4) The ceiling holds at the FIRST limited sample (onset) — the gain must
+//      be aligned to the detector's group delay and pre-ramped through the
+//      lookahead window, not applied after the transient has passed.
 //
-// Reference: docs/20 §4.8.
+// Reference: docs/13 §13.3.3, docs/20 §4.8.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "PolyphaseOversampler.h"
 #include "TruePeakLimiter.h"
 
 #include <algorithm>
@@ -45,6 +49,34 @@ float peakAbs(const std::vector<float>& v, int startN = 0)
     for (std::size_t i = static_cast<std::size_t>(startN); i < v.size(); ++i)
         p = std::max(p, std::abs(v[i]));
     return p;
+}
+
+// 4×-reconstructed true peak per the BS.1770-5 measurement method — the
+// same oversampler family the limiter's detector uses, so detection and
+// verification agree on the inter-sample phase grid.
+float truePeak4x(const std::vector<float>& v)
+{
+    PolyphaseOversampler<4> os;
+    double p = 0.0;
+    for (float s : v)
+        for (double u : os.upsample(static_cast<double>(s)))
+            p = std::max(p, std::abs(u));
+    return static_cast<float>(p);
+}
+
+float toDb(float lin) { return 20.0f * std::log10(std::max(lin, 1.0e-9f)); }
+
+// fs/4 tone burst with a phase offset: samples sit at A·|sin(πn/2+φ)| < A
+// while the reconstructed true peak ≈ A — a worst-case inter-sample-peak
+// stimulus.  Burst (not steady tone) so the ONSET is part of the measurement.
+std::vector<float> makeIspBurst(double amp, double phase,
+                                int N, int burstStart, int burstEnd)
+{
+    std::vector<float> v(static_cast<std::size_t>(N), 0.0f);
+    for (int n = burstStart; n < burstEnd; ++n)
+        v[static_cast<std::size_t>(n)] = static_cast<float>(
+            amp * std::sin(0.5 * std::numbers::pi * n + phase));
+    return v;
 }
 
 } // namespace
@@ -291,4 +323,119 @@ TEST_CASE("TruePeakLimiter: setCeilingDb honours the new value",
         const float p = peakAbs(outL, static_cast<int>(0.05 * kSampleRate));
         REQUIRE(p <= 0.97f * 1.05f);
     }
+}
+
+TEST_CASE("TruePeakLimiter: ISP burst onset is held at the ceiling",
+          "[mastering][tp-limiter][isp][onset]")
+{
+    // Regression for the detector-delay misalignment: the gain computed from
+    // the 4× detector belongs to the sample written kDetectorDelaySamples
+    // earlier.  Stored against the current sample instead, the burst onset
+    // passed unattenuated (+0.9 dBTP measured at a −1 dBTP ceiling).  The
+    // true-peak measurement spans the ENTIRE output including the onset.
+    constexpr int N = 6000;
+    constexpr int burstStart = 1024;
+    constexpr int burstEnd   = 4096;
+    const float ceilingDb = -1.0f;
+
+    struct Shape { double phase; float lookaheadMs; };
+    const Shape shapes[] = {
+        { std::numbers::pi / 4.0, 0.0f },   // 0 → keep default lookahead
+        { std::numbers::pi / 3.0, 0.0f },
+        { std::numbers::pi / 6.0, 0.0f },
+        { std::numbers::pi / 4.0, 5.0f },
+    };
+
+    for (const auto& shape : shapes)
+    {
+        TruePeakLimiter lim;
+        lim.prepare(kSampleRate);
+        lim.setBypass(false);
+        lim.setCeilingDb(ceilingDb);
+        if (shape.lookaheadMs > 0.0f)
+            lim.setLookaheadMs(shape.lookaheadMs);
+
+        const auto in = makeIspBurst(1.10, shape.phase, N, burstStart, burstEnd);
+        REQUIRE(toDb(truePeak4x(in)) > ceilingDb + 1.0f);  // stimulus is hot
+
+        auto out = in;
+        lim.process(out.data(), nullptr, N);
+
+        const float tpDb = toDb(truePeak4x(out));
+        INFO("phase = " << shape.phase
+             << ", lookaheadMs = " << shape.lookaheadMs
+             << ", output TP = " << tpDb << " dBTP");
+        REQUIRE(tpDb <= ceilingDb + 0.1f);
+
+        // Limiting must actually have engaged (not a silent/zeroed output).
+        REQUIRE(peakAbs(out) > 0.1f);
+        REQUIRE(lim.gainReductionDb() < 0.0f);
+    }
+}
+
+TEST_CASE("TruePeakLimiter: gain envelope steps bounded by 0.1 ms attack",
+          "[mastering][tp-limiter][attack][envelope]")
+{
+    // docs/13 §13.3.3: attack 0.1 ms, release 50 ms.  Per sample the applied
+    // gain may fall by at most factor exp(−1/τ_atk) and rise by at most the
+    // release one-pole toward unity — a step discontinuity fails both.
+    TruePeakLimiter lim;
+    lim.prepare(kSampleRate);
+    lim.setBypass(false);
+    lim.setCeilingDb(-1.0f);
+
+    constexpr int N = 6000;
+    // Hot enough (≈ −5 dB of required gain) that an instantaneous attack
+    // would exceed the per-sample attack bound by a wide margin.
+    const auto in = makeIspBurst(1.6, std::numbers::pi / 4.0, N, 1024, 4096);
+    auto out = in;
+    lim.process(out.data(), nullptr, N);
+
+    const int lat = lim.currentLatencyInSamples();
+    const float atk = static_cast<float>(std::exp(-1.0 / (0.0001 * kSampleRate)));
+    const float rel = static_cast<float>(std::exp(-1.0 / (0.050  * kSampleRate)));
+
+    float prevG = -1.0f;
+    float minG  =  1.0f;
+    for (int n = lat; n < N; ++n)
+    {
+        const float x = in[static_cast<std::size_t>(n - lat)];
+        if (std::abs(x) < 0.05f) { prevG = -1.0f; continue; }
+        const float g = out[static_cast<std::size_t>(n)] / x;
+        minG = std::min(minG, g);
+        if (prevG >= 0.0f)
+        {
+            INFO("n = " << n << ", prevG = " << prevG << ", g = " << g);
+            REQUIRE(g >= prevG * atk - 1.0e-4f);                  // attack rate
+            REQUIRE(g <= prevG * rel + (1.0f - rel) + 1.0e-4f);   // release rate
+        }
+        prevG = g;
+    }
+    // The burst must force significant reduction; otherwise the rate bounds
+    // above were checked against a trivially flat envelope.
+    REQUIRE(minG < 0.65f);
+}
+
+TEST_CASE("TruePeakLimiter: lookahead parameter scales the reported latency",
+          "[mastering][tp-limiter][lookahead]")
+{
+    TruePeakLimiter lim;
+    lim.prepare(kSampleRate);
+    lim.setBypass(true);
+    lim.setLookaheadMs(5.0f);
+
+    const int expected = static_cast<int>(std::round(0.005 * kSampleRate))
+                       + TruePeakLimiter::kDetectorDelaySamples;
+    REQUIRE(lim.currentLatencyInSamples() == expected);
+
+    // The reported latency must equal the actual delay through the limiter.
+    constexpr int N = 2048;
+    auto in = makeSine(220.0, 0.4, N);
+    auto out = in;
+    lim.process(out.data(), nullptr, N);
+
+    const int lat = lim.currentLatencyInSamples();
+    for (int n = lat; n < N; ++n)
+        REQUIRE(out[static_cast<std::size_t>(n)]
+                == Approx(in[static_cast<std::size_t>(n - lat)]).margin(1.0e-6f));
 }

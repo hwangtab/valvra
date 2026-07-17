@@ -131,3 +131,38 @@ TEST_CASE("Material presets: Si-steel saturates higher than permalloy", "[ja][ma
 
     REQUIRE(M_sisteel > M_permalloy);
 }
+
+TEST_CASE("JA Bertotti excess loss widens the loop with field rate",
+          "[ja][excess]")
+{
+    // docs/34 §3.2 — with the sample period supplied, faster field motion
+    // sees a rate-scaled pinning (k_dyn ∝ 1 + kExcess·√rate): the SAME H
+    // samples must trace a wider (lossier) loop than the quasi-static
+    // model (dt = 0), and the quasi-static path must remain bit-identical
+    // to the classic rate-independent behaviour.
+    auto loopArea = [](double dt) {
+        JilesAtherton ja { ja_params::kSiSteel_M6 };
+        ja.reset();
+        const double A = 2.0 * ja_params::kSiSteel_M6.a;
+        constexpr int kCycle = 480;   // 100 Hz at 48 kHz
+        double area = 0.0;
+        double hPrev = 0.0, mPrev = 0.0;
+        for (int i = 0; i < 4 * kCycle; ++i)
+        {
+            constexpr double kPi = 3.14159265358979323846;
+            const double h = A * std::sin(2.0 * kPi * i / double(kCycle));
+            const double m = ja.process(h, dt);
+            if (i >= 3 * kCycle)   // settled last cycle
+                area += 0.5 * (m + mPrev) * (h - hPrev);
+            hPrev = h; mPrev = m;
+        }
+        return std::abs(area);
+    };
+
+    const double areaStatic = loopArea(0.0);
+    const double areaFast   = loopArea(1.0 / 48000.0);
+    INFO("static loop area = " << areaStatic
+         << ", rate-aware = " << areaFast);
+    REQUIRE(areaStatic > 0.0);
+    REQUIRE(areaFast > 1.02 * areaStatic);   // measurably wider loop
+}

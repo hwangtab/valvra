@@ -273,3 +273,30 @@ TEST_CASE("EF86 triode-strapped is monotonic at typical bias",
     REQUIRE(ip_idle > 0.001);
     REQUIRE(ip_idle < 0.015);
 }
+
+TEST_CASE("Grid-current division region multiplies Ig when the plate "
+          "swings below the grid",
+          "[KorenTriode][division]")
+{
+    // docs/34 §3.1 (Rutt 1984): with the plate well above the grid the
+    // fitted Dempwolf law must be untouched; with the plate at/below the
+    // grid the grid competes for the space current and Ig rises toward
+    // (1 + divK)× the baseline.
+    KorenTriode t { params::kRSD_1 };
+    const double Vg = 3.0;   // conducting grid
+
+    const double base    = t.gridCurrent(Vg);
+    const double farAway = t.gridCurrent(Vg, 200.0);   // plate high
+    const double divided = t.gridCurrent(Vg, 1.0);     // plate bottomed
+
+    INFO("base=" << base << " far=" << farAway << " div=" << divided);
+    REQUIRE(farAway == Approx(base).epsilon(0.02));    // fit preserved
+    REQUIRE(divided > 2.0 * base);                     // division bites
+
+    // The Newton derivative must track the divided law (finite check).
+    const auto gd = t.gridCurrentWithDeriv(Vg, 1.0);
+    const double h = 1.0e-4;
+    const double fd = (t.gridCurrent(Vg + h, 1.0)
+                     - t.gridCurrent(Vg - h, 1.0)) / (2.0 * h);
+    REQUIRE(gd.dIg == Approx(fd).epsilon(0.02));
+}

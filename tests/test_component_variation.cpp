@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <cmath>
+#include <vector>
 #include "ComponentVariation.h"
 
 using Catch::Approx;
@@ -116,4 +117,73 @@ TEST_CASE("Applied variation to JA params preserves bounds", "[variation][ja]")
         REQUIRE(p.k  > 0.0);
         REQUIRE(p.Ms < base.Ms * 2.0);
     }
+}
+
+TEST_CASE("Era pathologies are zero on Modern, graded on vintage eras",
+          "[variation][era]")
+{
+    // docs/34 §3.6/§3.7 — coupling-cap leakage and carbon excess noise are
+    // properties the component ERA has or hasn't: hard zero on Modern,
+    // population means graded Vintage < Worn < Wild, hard caps respected.
+    double sumLeak[4] = {}, sumNoise[4] = {};
+    constexpr int N = 300;
+    const VariationDistribution dists[4] = {
+        VariationDistribution::Modern, VariationDistribution::Vintage,
+        VariationDistribution::Worn,   VariationDistribution::Wild };
+
+    for (int d = 0; d < 4; ++d)
+        for (int s = 0; s < N; ++s)
+        {
+            const auto v = makeVariation(0xABC000ULL + s, dists[d]);
+            REQUIRE(v.couplingLeak_ratio >= 0.0);
+            REQUIRE(v.couplingLeak_ratio <= 0.05);
+            REQUIRE(v.excessNoise_offset >= 0.0);
+            REQUIRE(v.excessNoise_offset <= 0.45);
+            sumLeak[d]  += v.couplingLeak_ratio;
+            sumNoise[d] += v.excessNoise_offset;
+        }
+
+    REQUIRE(sumLeak[0] == 0.0);          // Modern: no leakage at all
+    REQUIRE(sumNoise[0] == 0.0);         // Modern: no excess noise
+    REQUIRE(sumLeak[1] > 0.0);
+    REQUIRE(sumLeak[2] > sumLeak[1]);    // Worn leaks more than Vintage
+    REQUIRE(sumLeak[3] > sumLeak[2]);    // Wild leaks most
+    REQUIRE(sumNoise[2] > sumNoise[1]);
+    REQUIRE(sumNoise[3] > sumNoise[2]);
+}
+
+TEST_CASE("Tube G and mu draws are weakly correlated, marginals preserved",
+          "[variation][correlation]")
+{
+    // docs/34 §1.6 residual — perveance and amplification factor ride the
+    // same cathode lottery (ρ ≈ 0.4).  The correlated construction must
+    // keep each marginal σ at its documented value.
+    constexpr int N = 600;
+    double mG = 0.0, mMu = 0.0;
+    std::vector<double> gs, mus;
+    gs.reserve(N); mus.reserve(N);
+    for (int s = 0; s < N; ++s)
+    {
+        const auto v = makeVariation(0x5EED0000ULL + s,
+                                     VariationDistribution::Modern);
+        gs.push_back(v.tube_G_scale);
+        mus.push_back(v.tube_mu_scale);
+        mG += v.tube_G_scale; mMu += v.tube_mu_scale;
+    }
+    mG /= N; mMu /= N;
+    double sG = 0.0, sMu = 0.0, cov = 0.0;
+    for (int i = 0; i < N; ++i)
+    {
+        sG  += (gs[i] - mG) * (gs[i] - mG);
+        sMu += (mus[i] - mMu) * (mus[i] - mMu);
+        cov += (gs[i] - mG) * (mus[i] - mMu);
+    }
+    sG = std::sqrt(sG / N); sMu = std::sqrt(sMu / N);
+    const double rho = cov / N / (sG * sMu);
+
+    INFO("sigma_G=" << sG << " sigma_mu=" << sMu << " rho=" << rho);
+    REQUIRE(sMu == Approx(0.08).epsilon(0.25));    // Dempwolf μ spread kept
+    REQUIRE(sG == Approx(0.12).epsilon(0.25));     // perveance spread kept
+    REQUIRE(rho > 0.15);
+    REQUIRE(rho < 0.65);
 }

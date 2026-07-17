@@ -2,7 +2,7 @@
   "version": "fitted_v1",
   "target": "console",
   "dataset": {
-    "path": "/Users/hwang-gyeongha/tubeamp/build/artifacts/external_ctest/console_external_capture_v1.npz",
+    "path": "/Users/macbook_hwang/valvra/build/artifacts/external_ctest/console_external_capture_v1.npz",
     "source": "external_lab_capture",
     "mode": "console",
     "version": "console_external_capture_v1"
@@ -30,25 +30,25 @@
   },
   "fit_metrics": {
     "thd_curve_db": [
-      -30.575075698013432,
-      -25.620065082610225,
-      -20.997129108613258,
-      -16.409072164638523,
-      -19.748190583644433,
-      -18.62936182921776
+      -38.42966695686586,
+      -32.57077553836942,
+      -26.153662140497826,
+      -19.24050743074285,
+      -16.26898172228453,
+      -14.517880690646717
     ],
     "fr_db": [
-      -9.903928677623767,
-      -2.8910452741038384,
-      -0.8456362950070968,
-      0.3017344113017302,
+      -2.5836303065003188,
+      -1.762469352714847,
+      -1.4300014071941334,
+      -0.7265360987460241,
       0.0,
-      -4.275523809674475,
-      -12.090736677128184,
-      -15.753062909731511
+      -0.027846854405439103,
+      -1.6341157998163212,
+      -6.986402952677602
     ],
-    "crest_db": 11.547262554236827,
-    "transient_recovery": 0.5766526415057005,
-    "noise_floor_dbfs": -71.76230298910126
+    "crest_db": 8.552540083889113,
+    "transient_recovery": 0.912747078153929,
+    "noise_floor_dbfs": -35.50028150486562
   }
 }

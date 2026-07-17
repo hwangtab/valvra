@@ -2,7 +2,7 @@
   "version": "fitted_v1",
   "target": "hifi",
   "dataset": {
-    "path": "/Users/hwang-gyeongha/tubeamp/build/artifacts/external_ctest/hifi_external_capture_v1.npz",
+    "path": "/Users/macbook_hwang/valvra/build/artifacts/external_ctest/hifi_external_capture_v1.npz",
     "source": "external_lab_capture",
     "mode": "hifi",
     "version": "hifi_external_capture_v1"
@@ -30,25 +30,25 @@
   },
   "fit_metrics": {
     "thd_curve_db": [
-      -59.750092080981496,
-      -53.54644710967353,
-      -47.36460159787463,
-      -41.335872294990466,
-      -38.362577030096936,
-      -35.417154100531384
+      -24.2418056566788,
+      -10.398727216580173,
+      -6.303369711297638,
+      -4.199281652458912,
+      -5.809607578880867,
+      -2.0645927555433965
     ],
     "fr_db": [
-      23.186531651725147,
-      20.119834567642563,
-      14.70263628671956,
-      2.4858301103744296,
+      3.574743903907814,
+      5.103070803004018,
+      3.431278904221985,
+      -0.022452059930850865,
       0.0,
-      -0.11902783214446089,
-      -0.13024975344047363,
-      -0.13132245255783914
+      2.326710738588787,
+      5.138164229011265,
+      6.1221063359666825
     ],
-    "crest_db": 10.812533834555175,
-    "transient_recovery": 0.17883493033643458,
-    "noise_floor_dbfs": -59.38416071824822
+    "crest_db": 9.885447469988536,
+    "transient_recovery": 0.930387545275671,
+    "noise_floor_dbfs": -59.87595047723339
   }
 }

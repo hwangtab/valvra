@@ -412,6 +412,16 @@ private:
     bool   pendingMsMode_ { false };
     bool   pendingMsModeValid_ { false };
 
+    // Slow-state carry-over across parameter-edit rebuilds (docs/34 §4.3):
+    // fingerprint of the last built graph.  A rebuild with an unchanged
+    // fingerprint (same preset / seed / internal rate / routing) re-bases
+    // the previous chains' warmup, thermal, magnetic and supply history
+    // onto the new operating points instead of cold-starting them.
+    int           carryLastPreset_ { -1 };
+    std::uint64_t carryLastSeed_   { 0 };
+    double        carryLastSR_     { 0.0 };
+    bool          carryLastMs_     { false };
+
     // Parameter smoothers — prevent zipper noise when the user moves knobs.
     // 20 ms smoothing is long enough to be inaudible but short enough to
     // remain responsive for fast automation curves.
@@ -520,7 +530,11 @@ private:
     std::atomic<float>   microMotionState_ { 0.0f };
     std::atomic<float>   lowLevelHarmonicSlopeState_ { 0.0f };
     std::atomic<float>   interactionDriveState_ { 0.0f };
-    int                  lastTpLatency_ { dsp::TruePeakLimiter::kLookaheadSamples };
+    int                  lastTpLatency_ { dsp::TruePeakLimiter::latencyInSamples() };
+    // Output-safety soft-clip gating (see processBlock): the clip runs
+    // only across a transition window, never in steady state.
+    bool                 lastLimiterBypassed_ { false };
+    int                  safetyHoldSamples_ { 0 };
     float                recentInputRmsDb_ { -100.0f };
     float                recentMatchOutputRmsDb_ { -100.0f };
 
@@ -655,7 +669,13 @@ private:
     // setLatencySamples() report, so downstream tracks stay tight too.
     struct DryDelay
     {
-        static constexpr std::size_t kSize = 128;      // > max latency (32)
+        // Must exceed the maximum OS round-trip latency it absorbs —
+        // PolyphaseOversampler::latencyInBaseSamples() is 63 at every
+        // factor since the factor-scaled FIR redesign.  256 keeps 4x
+        // headroom; setLatency() clamps silently, so an undersized ring
+        // would mis-align the dry path (comb filtering, broken null
+        // test) with no error.
+        static constexpr std::size_t kSize = 256;
         static constexpr std::size_t kMask = kSize - 1;
         static constexpr int kLatencyCrossfadeSamples = 64;
         std::array<float, kSize> buf {};

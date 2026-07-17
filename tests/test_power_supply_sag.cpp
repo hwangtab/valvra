@@ -90,34 +90,118 @@ TEST_CASE("PSU DC level is always ≤ Vb_nominal", "[psu][invariant]")
     }
 }
 
-TEST_CASE("PSU rail carries 120 Hz ripple with expected magnitude",
+TEST_CASE("PSU rail carries load-dependent 120 Hz ripple (reservoir physics)",
           "[psu][ripple]")
 {
-    auto p = psu_presets::kGZ34;
+    // The reservoir-capacitor model makes ripple EMERGENT: charge pulses
+    // near each |sin| crest, discharge into the load between them.  Three
+    // physical facts the legacy fixed-amplitude sine could not show:
+    //   1. no load → (almost) no ripple — the cap rides the crest
+    //   2. ripple peak-to-peak grows ≈ I/(f·C) with load current
+    //   3. the loaded rail average sags below nominal
+    //
+    // Uses the 6X4 preset: a bare reservoir with no smoothing choke, so the
+    // ripple appears directly at the output node.  (The GZ34 preset now adds
+    // a choke — see the separate "smoothing choke reduces output ripple"
+    // case — which deliberately filters this ripple away, exactly as a real
+    // choke-filtered supply does.)
+    auto p = psu_presets::k6X4_Pultec;
     p.sampleRate = 48000.0;
-    PowerSupplySag psu { p };
 
-    // Quiescent current — sag envelope settles to zero, leaving only
-    // ripple on top of Vb_nominal.
-    for (int i = 0; i < 10000; ++i) psu.process(0.0);
+    auto measure = [&](double iLoad) {
+        PowerSupplySag psu { p };
+        for (int i = 0; i < 48000; ++i) psu.process(iLoad);   // settle 1 s
+        psu.process(iLoad);
+        double vbMin = psu.currentVb();
+        double vbMax = vbMin;
+        double vbSum = 0.0;
+        const int N = 8000;   // several ripple cycles
+        for (int i = 0; i < N; ++i)
+        {
+            psu.process(iLoad);
+            const double vb = psu.currentVb();
+            if (vb < vbMin) vbMin = vb;
+            if (vb > vbMax) vbMax = vb;
+            vbSum += vb;
+        }
+        struct R { double pp, avg; };
+        return R { vbMax - vbMin, vbSum / N };
+    };
 
-    // Avoid numeric_limits::infinity() — the test suite is compiled with
-    // -ffast-math, under which infinities are UB and min/max behave in
-    // surprising ways.  Prime with the first measured value instead.
-    psu.process(0.0);
-    double vbMin = psu.currentVb();
-    double vbMax = vbMin;
-    for (int i = 0; i < 8000; ++i)  // several ripple cycles
-    {
-        psu.process(0.0);
-        const double vb = psu.currentVb();
-        if (vb < vbMin) vbMin = vb;
-        if (vb > vbMax) vbMax = vb;
-    }
+    const auto idle   = measure(0.0);
+    const auto light  = measure(0.01);   // 10 mA
+    const auto heavy  = measure(0.04);   // 40 mA
 
-    // Peak-to-peak ≈ 2 × ripple_amp, with wiggle room for sampling phase.
-    const double pp = vbMax - vbMin;
-    REQUIRE(pp == Approx(2.0 * p.ripple_amp).epsilon(0.05));
-    // Ripple is centered on Vb_nominal (sag is zero at rest)
-    REQUIRE((vbMin + vbMax) * 0.5 == Approx(p.Vb_nominal).margin(0.01));
+    // 1. Unloaded rail is essentially ripple-free and at nominal.
+    REQUIRE(idle.pp < 0.1);
+    REQUIRE(idle.avg == Approx(p.Vb_nominal).margin(1.0));
+
+    // 2. Ripple grows with load current (roughly proportionally).
+    REQUIRE(light.pp > 0.5);
+    REQUIRE(heavy.pp > 2.0 * light.pp);
+
+    // 3. The loaded rail sags below nominal, more so at heavy load.
+    REQUIRE(light.avg < p.Vb_nominal - 0.5);
+    REQUIRE(heavy.avg < light.avg);
+}
+
+TEST_CASE("PSU smoothing choke reduces output ripple (docs/34 §3.4)",
+          "[psu][choke]")
+{
+    // A choke + second cap (π filter) is a second LC smoothing stage, so
+    // the output ripple should be far lower than the same rectifier feeding
+    // a bare reservoir.  Compare the GZ34 preset (choke on) against a copy
+    // with the choke defeated but every other value identical.
+    auto measurePP = [](PSUSagParams p) {
+        p.sampleRate = 48000.0;
+        PowerSupplySag psu { p };
+        for (int i = 0; i < 48000; ++i) psu.process(0.04);   // settle 1 s
+        double vMin = psu.currentVb(), vMax = vMin;
+        for (int i = 0; i < 8000; ++i)
+        {
+            psu.process(0.04);
+            const double vb = psu.currentVb();
+            vMin = std::min(vMin, vb);
+            vMax = std::max(vMax, vb);
+        }
+        return vMax - vMin;
+    };
+
+    auto withChoke = psu_presets::kGZ34;      // choke enabled in the preset
+    auto noChoke   = psu_presets::kGZ34;
+    noChoke.enableChoke = false;              // bare reservoir, same rectifier
+
+    const double ppChoke   = measurePP(withChoke);
+    const double ppNoChoke = measurePP(noChoke);
+
+    // The choke stage should knock the ripple down by a large factor.
+    REQUIRE(ppNoChoke > 0.3);
+    REQUIRE(ppChoke < 0.5 * ppNoChoke);
+    // And the output must never exceed the unloaded crest.
+    REQUIRE(withChoke.Vb_nominal + 1.0 > measurePP(withChoke) + 0.0);
+}
+
+TEST_CASE("PSU vacuum rectifier sags with sub-linear (space-charge) depth",
+          "[psu][spacecharge]")
+{
+    // A Child-Langmuir (exponent 1.5) rectifier drops as ΔV ∝ I^{2/3}, so
+    // doubling the load current less-than-doubles the sag — the vacuum
+    // "firm up" behaviour.  A silicon (ohmic, exponent 1.0) diode would
+    // sag in proportion.  Compare the incremental sag ratio.
+    auto sagAt = [](PSUSagParams p, double iLoad) {
+        p.sampleRate = 48000.0;
+        p.enableChoke = false;   // isolate the rectifier curvature
+        PowerSupplySag psu { p };
+        for (int i = 0; i < 96000; ++i) psu.process(iLoad);   // settle 2 s
+        return p.Vb_nominal - psu.sagPercent() / 100.0 * p.Vb_nominal;
+    };
+
+    auto vac = psu_presets::kGZ34;   // exponent 1.5
+    const double sagLoVac = vac.Vb_nominal - sagAt(vac, 0.02);
+    const double sagHiVac = vac.Vb_nominal - sagAt(vac, 0.04);
+
+    // Sub-linear: doubling current raises the sag by LESS than 2× for the
+    // space-charge rectifier (a purely ohmic supply would give exactly 2×).
+    REQUIRE(sagHiVac > sagLoVac);              // heavier load still sags more
+    REQUIRE(sagHiVac < 2.0 * sagLoVac);        // but sub-linearly (firm-up)
 }

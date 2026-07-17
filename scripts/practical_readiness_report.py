@@ -34,7 +34,11 @@ FEEL_VERIFY_SUMMARY = ROOT / "artifacts" / "feel_verify_summary.json"
 
 SR = 48_000
 DUR_SEC = 3.0
-WARMUP_SEC = 0.5
+# Pre-roll before analysis: the engine's output-DC trackers settle with a
+# fixed 0.5 Hz corner (sample-rate independent), so the turn-on residue
+# needs ~3 s to clear.  (The legacy 0.5 s sufficed only because the old
+# fs-dependent tracker coefficient settled 12x too fast at 8x OS.)
+WARMUP_SEC = 3.0
 
 PRESETS = ["v72", "rndi", "marshall", "cv", "hifi"]
 OS_FACTORS = [1, 2, 4, 8, 16]
@@ -125,7 +129,12 @@ def recovery_texture_metric(sig: np.ndarray, sr: int) -> float:
 def noise_micro_motion_metric(sig: np.ndarray, sr: int = SR) -> float:
     if sig.size < 4096:
         return 0.0
-    start = min(sig.size // 2, int(0.75 * sr))
+    # Skip the start-up settling window: the physics engine's output-DC
+    # trackers (tau ~0.32 s) and tube warm-up drift leave a decaying LF
+    # residue for the first ~1.5 s on the hum-free presets (rndi/hifi).
+    # That is intended "tube wakes up" behaviour, not the steady-state
+    # noise-floor pumping this metric gates.
+    start = min(sig.size // 2, int(1.5 * sr))
     x = sig[start:].astype(np.float64, copy=False)
     if x.size < 4096:
         x = sig.astype(np.float64, copy=False)

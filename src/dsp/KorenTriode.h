@@ -22,6 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 namespace valvra::dsp {
@@ -50,6 +51,17 @@ struct DempwolfParams
     double Cak {0.9e-12};  ///< Plate–cathode capacitance [F]
     double Cgk {2.3e-12};  ///< Grid–cathode capacitance [F]
     double Cag {2.4e-12};  ///< Grid–plate (Miller source) [F]
+
+    // ─── Grid-current division region (docs/34 §3.1, Rutt 1984) ─────────
+    // The Dempwolf Ig law is fitted with the plate well above the grid.
+    // When a hard-driven plate swings DOWN toward/below the grid voltage,
+    // the grid competes directly for the space current and collects a
+    // several-fold larger share — the "division region" that makes deep
+    // overdrive blocking bite harder than the baseline law predicts.
+    // Ig_eff = Ig·(1 + divK·σ((Vg−Va)/divV)); σ→0 for Va ≫ Vg keeps the
+    // fitted law intact everywhere the fit was made.
+    double divK {4.0};     ///< extra Ig multiple deep in division
+    double divV {8.0};     ///< Vg−Va logistic transition width [V]
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,9 +96,12 @@ namespace params
     // Approximated via Koren shape: Ik = (E1^Ex)/Kg * (1+sgn(E1)),
     // mapped to Dempwolf by matching small-signal gm and plate curves at
     // Vp=250V, Vg=-8.5V (datasheet operating point).
-    // Tuning validated against Pocnet ECC82 datasheet.
+    // Recalibrated against the Pocnet ECC82 datasheet point now that the
+    // plate node is actually solved: Ip(250, −8.5) = 10.5 mA, gm = 2.2 mA/V
+    // (the previous G = 2.2e-3 hit 23.6 mA / 4.95 mA/V — a hand
+    // compensation for the missing load line).
     constexpr DempwolfParams kECC82_Koren = {
-        .G = 2.2e-3, .mu = 17.0, .gamma = 1.30, .C = 4.5,
+        .G = 9.785e-4, .mu = 17.0, .gamma = 1.30, .C = 4.5,
         .Gg = 3.0e-4, .xi = 1.25, .Cg = 10.0, .Ig0 = 1.0e-7,
         .Cak = 1.5e-12, .Cgk = 1.6e-12, .Cag = 1.5e-12
     };
@@ -104,8 +119,10 @@ namespace params
     // because it's the most common voicing in modern guitar-amp output
     // stages (post-1970 Marshalls and clones) and falls within the
     // Dempwolf triode framework without modification.
+    // Recalibrated at the working anchor Ip(450 V, −36 V) = 55 mA,
+    // gm ≈ 11 mA/V (JCM800-class idle at the documented fixed bias).
     constexpr DempwolfParams kEL34_TriodeStrapped = {
-        .G = 5.0e-3, .mu = 10.5, .gamma = 1.40, .C = 3.0,
+        .G = 3.713e-3, .mu = 10.5, .gamma = 1.40, .C = 3.0,
         .Gg = 2.0e-4, .xi = 1.30, .Cg = 8.0, .Ig0 = 1.0e-7,
         .Cak = 8.5e-12, .Cgk = 15.2e-12, .Cag = 1.1e-12
     };
@@ -114,8 +131,11 @@ namespace params
     // Slightly higher mu than EL34, harder transition to cutoff (faster
     // softplus knee), more "bite" at the top end of overdrive.  Same
     // calibration approach: data-sheet curves → Koren → Dempwolf form.
+    // Recalibrated at the RCA triode-connection point Ip(250 V, −20 V)
+    // = 40 mA (datasheet gm 4.7 mA/V; model lands 5.7 — curve-shape
+    // limited, within the unit spread Monte Carlo applies anyway).
     constexpr DempwolfParams k6L6GC_TriodeStrapped = {
-        .G = 4.6e-3, .mu = 8.5, .gamma = 1.35, .C = 3.4,
+        .G = 1.939e-3, .mu = 8.5, .gamma = 1.35, .C = 3.4,
         .Gg = 1.8e-4, .xi = 1.28, .Cg = 9.0, .Ig0 = 1.0e-7,
         .Cak = 6.5e-12, .Cgk = 11.8e-12, .Cag = 1.2e-12
     };
@@ -131,8 +151,11 @@ namespace params
     // datasheet operating point (Vp=250 V, Vg=−8 V → Ip ≈ 9 mA per tube
     // section, ≈ 18 mA effective when both halves of the bottle are
     // tied in parallel — the more common HiFi usage).
+    // Recalibrated per-section: Ip(250 V, −8 V) = 9 mA, gm 2.8 mA/V
+    // (RCA datasheet 9 mA / 2.6 mA/V; the previous G modelled both
+    // bottle halves in parallel while the stage models one section).
     constexpr DempwolfParams k6SN7 = {
-        .G = 2.5e-3, .mu = 20.0, .gamma = 1.40, .C = 3.50,
+        .G = 1.096e-3, .mu = 20.0, .gamma = 1.40, .C = 3.50,
         .Gg = 4.0e-4, .xi = 1.32, .Cg = 11.0, .Ig0 = 1.0e-7,
         .Cak = 1.4e-12, .Cgk = 3.0e-12, .Cag = 4.0e-12
     };
@@ -152,8 +175,11 @@ namespace params
     // Calibration procedure: Koren parameters (μ=3.85, Ex=1.5, Kg ≈
     // 1500, Kp=50) → Dempwolf G ≈ 1/Kg.  Verified at the WE 300B-
     // canonical operating point against published plate-curve sheets.
+    // Recalibrated to the WE 300B canonical point Ip(350 V, −76 V)
+    // = 70 mA (datasheet 60–80 mA; the previous "2× idle convention"
+    // had no basis and put the tube at 121 mA).
     constexpr DempwolfParams k300B = {
-        .G = 2.1e-3, .mu = 3.85, .gamma = 1.50, .C = 4.0,
+        .G = 1.216e-3, .mu = 3.85, .gamma = 1.50, .C = 4.0,
         .Gg = 8.0e-4, .xi = 1.40, .Cg = 6.0, .Ig0 = 5.0e-7,
         .Cak = 4.3e-12, .Cgk = 9.0e-12, .Cag = 12.0e-12
     };
@@ -173,8 +199,10 @@ namespace params
     // Calibration: Mullard EF86 datasheet triode-strap operating point
     // (Vp = 250 V, Vg = −2 V → Ip ≈ 3 mA).  Koren fit Kg ≈ 13000,
     // mapped to Dempwolf G = 1/Kg = 0.77e-3.
+    // Recalibrated to the Mullard triode-strap point Ip(250 V, −2 V)
+    // = 3 mA (was 6.9 mA — the same ~2.3× load-line hand compensation).
     constexpr DempwolfParams kEF86_TriodeStrapped = {
-        .G = 8.2e-4, .mu = 38.0, .gamma = 1.40, .C = 3.60,
+        .G = 3.565e-4, .mu = 38.0, .gamma = 1.40, .C = 3.60,
         .Gg = 5.0e-4, .xi = 1.30, .Cg = 10.0, .Ig0 = 8.0e-8,
         .Cak = 1.0e-12, .Cgk = 3.0e-12, .Cag = 0.06e-12
     };
@@ -245,6 +273,70 @@ public:
         const double s = softplus(p_.Cg * Vg) / p_.Cg;
         if (s <= 0.0) return p_.Ig0;
         return p_.Gg * std::pow(s, p_.xi) + p_.Ig0;
+    }
+
+    // Division-region multiplier (docs/34 §3.1): smooth logistic in
+    // (Vg − Va) that leaves the fitted law untouched for Va ≫ Vg and
+    // multiplies Ig by up to (1 + divK) when the plate dips below the
+    // grid (the grid then competes directly for the space current).
+    double gridDivisionFactor(double Vg, double Va) const noexcept
+    {
+        if (p_.divK <= 0.0) return 1.0;
+        const double x = (Vg - Va) / std::max(p_.divV, 1.0e-3);
+        if (x < -20.0) return 1.0;
+        return 1.0 + p_.divK / (1.0 + std::exp(-x));
+    }
+
+    /// Grid current including the plate-competition division region —
+    /// pass the (one-sample-stale) plate-cathode voltage from the solver.
+    double gridCurrent(double Vg, double Va) const noexcept
+    {
+        return gridCurrent(Vg) * gridDivisionFactor(Vg, Va);
+    }
+
+    // Grid current with its analytic slope dIg/dVg in one pass — the
+    // grid-conduction Newton in TubeStage needs both, and the closed
+    // form (same chain rule as evalWithDerivatives' grid branch) saves
+    // the two finite-difference evaluations per iteration.
+    struct IgDeriv { double Ig; double dIg; };
+    IgDeriv gridCurrentWithDeriv(double Vg) const noexcept
+    {
+        const double cgv = p_.Cg * Vg;
+        double sp_g, sig_g;
+        if (cgv > 20.0)       { sp_g = cgv;          sig_g = 1.0;  }
+        else if (cgv < -20.0) { sp_g = std::exp(cgv); sig_g = sp_g; }
+        else
+        {
+            const double e = std::exp(cgv);
+            sp_g  = std::log1p(e);
+            sig_g = e / (1.0 + e);
+        }
+        const double sg = sp_g / p_.Cg;
+        IgDeriv r { p_.Ig0, 0.0 };
+        if (sg > 0.0)
+        {
+            r.Ig  += p_.Gg * std::pow(sg, p_.xi);
+            r.dIg  = p_.xi * p_.Gg * std::pow(sg, p_.xi - 1.0) * sig_g;
+        }
+        return r;
+    }
+
+    /// Grid current + slope including the division region (product rule:
+    /// the logistic also moves with Vg at fixed plate).  Used by the
+    /// grid-conduction Newton so its step stays exact deep in overdrive.
+    IgDeriv gridCurrentWithDeriv(double Vg, double Va) const noexcept
+    {
+        IgDeriv r = gridCurrentWithDeriv(Vg);
+        if (p_.divK <= 0.0) return r;
+        const double w = std::max(p_.divV, 1.0e-3);
+        const double x = (Vg - Va) / w;
+        if (x < -20.0) return r;
+        const double sig = 1.0 / (1.0 + std::exp(-x));
+        const double f   = 1.0 + p_.divK * sig;
+        const double df  = p_.divK * sig * (1.0 - sig) / w;
+        r.dIg = r.dIg * f + r.Ig * df;
+        r.Ig *= f;
+        return r;
     }
 
     // Plate current: Ip = Ik - Ig (KCL at plate)

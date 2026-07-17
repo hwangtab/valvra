@@ -43,7 +43,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: macos-14
     name: Fit Pipeline Smoke
-    timeout-minutes: 45
+    # The physics-solver engine lengthened the 5-mode refit render to
+    # ~25 min on an 8-core arm64; CI runners have fewer cores, so the
+    # job budget must comfortably exceed the in-tree ctest TIMEOUT 3600.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4

@@ -76,7 +76,10 @@ if(TARGET valvra_process)
             )
             set_tests_properties(valvra_external_refit_pipeline_smoke PROPERTIES
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                TIMEOUT 1200
+                # The physics overhaul (per-sample node solvers + factor-
+                # scaled oversampling FIRs) lengthened the full 5-mode
+                # refit render from ~13 to ~25 min on an 8-core arm64.
+                TIMEOUT 3600
                 LABELS "fit_pipeline;plugin_stress"
             )
         endif()

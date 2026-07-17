@@ -115,10 +115,11 @@ TEST_CASE("TubeStage: large signal generates harmonics (asymmetric saturation)",
     const double dcOffset = sum / static_cast<double>(out.size());
 
     // Asymmetric saturation produces small but measurable DC offset before
-    // the AC coupling leak removes it. With a 0.9999 leak alpha, the offset
-    // settles slowly; checking that |dc| is non-trivial confirms asymmetry.
-    // Very small threshold — just ensure the signal is not perfectly symmetric.
-    REQUIRE(std::abs(dcOffset) < 0.5);  // bounded
+    // the AC coupling leak removes it.  The 0.5 Hz DC tracker settles over
+    // ~300 ms, and the load-line makeup gain (≈7× for this preset) scales
+    // the transient offset accordingly — the bound only guards against an
+    // unbounded/unsettled output, not a particular asymmetry magnitude.
+    REQUIRE(std::abs(dcOffset) < 2.5);  // bounded
 }
 
 TEST_CASE("TubeStage: warmup produces gain ramp over time", "[TubeStage][warmup]")
@@ -409,8 +410,10 @@ TEST_CASE("TubeStage: grid conduction leaves a post-burst recovery tail",
         s.setup(c, kSampleRate);
         for (int i = 0; i < 5000; ++i) s.process(0.0, c.Vp_nominal);
         for (int i = 0; i < burstN; ++i) (void) s.process(1.0, c.Vp_nominal);
-        // Let ~10 · τ elapse so any charge has fully leaked off.
-        const int settleN = static_cast<int>(0.25 * kSampleRate);
+        // Let ~10 · τ elapse so any charge has fully leaked off.  Long
+        // enough for the 0.5 Hz output-DC tracker (τ ≈ 320 ms) to
+        // re-centre as well, not just the grid-cap charge.
+        const int settleN = static_cast<int>(1.5 * kSampleRate);
         for (int i = 0; i < settleN; ++i) (void) s.process(0.0, c.Vp_nominal);
         // Now sample steady state
         double acc = 0.0;
@@ -644,8 +647,11 @@ TEST_CASE("TubeStage: microphonic coupling adds resonance-band modulation",
     cfg.enableGridConduction = false;
     cfg.enableShotNoise      = false;
     cfg.enableSlewLimit      = false;
-    // Exaggerate mic depth for unit-test sensitivity.
-    cfg.micDepth             = 0.05;
+    // Exaggerate mic depth for unit-test sensitivity.  With the plate
+    // load line active, Ip excursions are divided by the rp ∥ Rp factor,
+    // so the resonator needs a hotter drive than the legacy engine did.
+    cfg.inputVoltageSwing    = 1.0;
+    cfg.micDepth             = 0.15;
     cfg.micResonanceHz       = 120.0;
     cfg.micResonanceQ        = 6.0;
 
@@ -658,26 +664,32 @@ TEST_CASE("TubeStage: microphonic coupling adds resonance-band modulation",
 
         const int N = static_cast<int>(0.4 * kSampleRate);
         const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
+        const double wN = std::numbers::pi / static_cast<double>(N - 1);
         double re = 0.0, im = 0.0;
         for (int n = 0; n < N; ++n)
         {
             // 50 Hz fundamental drive that puts plate current swinging
             // hard enough to excite the 120 Hz mech resonance via gm
-            // modulation (every half-cycle of Ip variation).
+            // modulation (every half-cycle of Ip variation).  Hann
+            // windowing keeps the strong 50 Hz harmonics (100/150 Hz)
+            // from leaking into the sideband bin under test.
             const double drive = 0.6
                 * std::sin(2.0 * std::numbers::pi * 50.0 * n / kSampleRate);
-            const double y = s.process(drive, c.Vp_nominal);
+            const double hann = std::sin(wN * n);
+            const double y = s.process(drive, c.Vp_nominal) * hann * hann;
             re += y * std::cos(w * n);
             im += y * std::sin(w * n);
         }
         return std::sqrt(re * re + im * im) / static_cast<double>(N);
     };
 
-    // The 120 Hz bin should grow with microphonics enabled, because gm
-    // modulation creates AM sidebands centred on the resonator's peak.
-    const double bin120_on  = rmsAt(true,  120.0);
-    const double bin120_off = rmsAt(false, 120.0);
-    REQUIRE(bin120_on  > 1.10 * bin120_off);
+    // gm modulation by the 120 Hz resonator AMPLITUDE-MODULATES the
+    // 50 Hz fundamental: products land at 120 ± 50 Hz.  170 Hz is not a
+    // harmonic of 50 Hz, so it is a clean discriminator — without the
+    // mechanical coupling there is (almost) nothing there.
+    const double sb_on  = rmsAt(true,  170.0);
+    const double sb_off = rmsAt(false, 170.0);
+    REQUIRE(sb_on > 2.0 * (sb_off + 1.0e-9));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -781,12 +793,15 @@ TEST_CASE("TubeStage: slew limit makes falling edges faster than rising edges",
 // `millerSignalDepth = 0` (legacy static Miller), the dynamic path must
 // attenuate a 10 kHz tone more when the stage is driven hard.
 // ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("TubeStage: Miller cutoff drops under heavy conduction",
+TEST_CASE("TubeStage: Miller cutoff opens as the stage saturates",
           "[stage][miller][program-dependent]")
 {
-    // Marshall stage 2 is driven hard, so |Ip| average rises substantially
-    // above quiescent — where dynamic Miller can actually make a
-    // measurable HF difference.
+    // docs/04 §3.2: approaching saturation/cutoff the incremental gain
+    // |Av| DROPS, so C_miller = Cgp·(1+|Av|) shrinks and the HF rolloff
+    // relaxes — a hard-driven stage sounds slightly more open on top.
+    // (The legacy heuristic had this backwards: it grew C_m with |Ip|.)
+    // Verified against the solved operating point: at ±6 V grid drive the
+    // 12AX7 spends half of each cycle near cutoff where gm ≈ 0.
     auto cfg = presets::marshallStage2();
     cfg.enableWarmup         = false;
     cfg.enableHeaterHum      = false;
@@ -820,15 +835,142 @@ TEST_CASE("TubeStage: Miller cutoff drops under heavy conduction",
         return std::sqrt(re * re + im * im) / N;
     };
 
-    const double loudStatic   = measure(0.0, 1.0);
-    const double loudDynamic  = measure(2.0, 1.0);  // depth 2 for crispness
+    const double loudStatic   = measure(0.0, 6.0);
+    const double loudDynamic  = measure(1.0, 6.0);
     const double quietStatic  = measure(0.0, 0.02);
-    const double quietDynamic = measure(2.0, 0.02);
+    const double quietDynamic = measure(1.0, 0.02);
 
-    const double rStatic  = loudStatic  / quietStatic;
-    const double rDynamic = loudDynamic / quietDynamic;
+    // Quiet: dynamic and static Miller agree (|Av| sits at rest).
+    REQUIRE(quietDynamic == Approx(quietStatic).epsilon(0.01));
 
-    // Dynamic Miller must produce more HF attenuation on the loud signal
-    // than the static Miller baseline.
-    REQUIRE(rDynamic < rStatic * 0.95);
+    // Saturating: the dynamic path passes MORE HF than the static one —
+    // the incremental-gain collapse opens the Miller corner.
+    REQUIRE(loudDynamic > 1.05 * loudStatic);
+}
+
+TEST_CASE("TubeStage: Miller feedthrough is silent in the linear region, "
+          "active on clipped edges",
+          "[TubeStage][feedthrough]")
+{
+    // docs/34 §3.5 — the injected term is the NONLINEAR residual of the
+    // plate step, so a small-signal render must be essentially identical
+    // with the flag on or off, while a hard-clipped render must differ.
+    auto renderWith = [&](bool ft, double amp) {
+        TubeStage stage;
+        auto cfg = presets::v72Stage1();
+        cfg.enableWarmup = false;
+        cfg.enableShotNoise = false;
+        cfg.enableHeaterHum = false;
+        cfg.enableMillerFeedthrough = ft;
+        stage.setup(cfg, kSampleRate);
+        std::vector<double> out;
+        processSine(stage, 1000.0, amp, 0.15, 260.0, &out);
+        return out;
+    };
+
+    // Linear region: relative deviation stays tiny.
+    {
+        const auto on  = renderWith(true, 0.02);
+        const auto off = renderWith(false, 0.02);
+        double diffSq = 0.0, refSq = 0.0;
+        for (std::size_t i = on.size() / 2; i < on.size(); ++i)
+        {
+            diffSq += (on[i] - off[i]) * (on[i] - off[i]);
+            refSq  += off[i] * off[i];
+        }
+        const double rel = std::sqrt(diffSq / std::max(refSq, 1.0e-30));
+        INFO("linear-region relative deviation = " << rel);
+        REQUIRE(rel < 0.01);
+    }
+
+    // Hard clip: the collapsed Miller feedback lets the edge through.
+    {
+        const auto on  = renderWith(true, 6.0);
+        const auto off = renderWith(false, 6.0);
+        double diffSq = 0.0, refSq = 0.0;
+        for (std::size_t i = on.size() / 2; i < on.size(); ++i)
+        {
+            diffSq += (on[i] - off[i]) * (on[i] - off[i]);
+            refSq  += off[i] * off[i];
+        }
+        const double rel = std::sqrt(diffSq / std::max(refSq, 1.0e-30));
+        INFO("clipped-region relative deviation = " << rel);
+        for (double v : on) REQUIRE(std::isfinite(v));
+        REQUIRE(rel > 1.0e-4);
+    }
+}
+
+TEST_CASE("TubeStage: next-stage grid-leak AC load keeps calibrated level",
+          "[TubeStage][rgload]")
+{
+    // docs/34 §3.8 — loading the plate with the next stage's 1 MΩ leak
+    // changes the physical gain by ~9%, and outputMakeup_ must restore
+    // the calibrated small-signal level (curvature, not level, changes).
+    auto h1At = [&](double rgNext) {
+        TubeStage stage;
+        auto cfg = presets::v72Stage1();
+        cfg.enableWarmup = false;
+        cfg.enableShotNoise = false;
+        cfg.enableHeaterHum = false;
+        cfg.nextStageLoadR = rgNext;
+        stage.setup(cfg, kSampleRate);
+        std::vector<double> out;
+        processSine(stage, 1000.0, 0.02, 0.2, 260.0, &out);
+        double s = 0.0;
+        for (std::size_t i = out.size() / 2; i < out.size(); ++i)
+            s += out[i] * out[i];
+        return std::sqrt(s / (out.size() / 2.0));
+    };
+
+    const double lvlIsolated = h1At(0.0);
+    const double lvlLoaded   = h1At(1.0e6);
+    const double dB = 20.0 * std::log10(
+        std::max(lvlLoaded, 1.0e-12) / std::max(lvlIsolated, 1.0e-12));
+    INFO("level shift with Rg load = " << dB << " dB");
+    REQUIRE(std::abs(dB) < 0.5);
+}
+
+TEST_CASE("TubeStage: reactive speaker load bends the SE load line by "
+          "frequency",
+          "[TubeStage][reactive]")
+{
+    // docs/34 §2.5 — the 300B's reflected load is a loudspeaker: at the
+    // motional resonance the impedance rises several-fold, so the loud
+    // low-frequency behaviour must differ materially from the fixed
+    // resistor, while the mid-band (|Z| ≈ Rp) keeps the calibration.
+    auto render = [&](bool reactive, double freq, double amp) {
+        TubeStage st;
+        auto cfg = presets::hifi300BPower();
+        cfg.enableWarmup = false;
+        cfg.enableShotNoise = false;
+        cfg.plateLoadReactive = reactive;
+        st.setup(cfg, kSampleRate);
+        std::vector<double> out;
+        processSine(st, freq, amp, 0.4, 360.0, &out);
+        double s = 0.0;
+        for (std::size_t i = out.size() / 2; i < out.size(); ++i)
+        {
+            REQUIRE(std::isfinite(out[i]));
+            s += out[i] * out[i];
+        }
+        return std::sqrt(s / (out.size() / 2.0));
+    };
+
+    // Mid-band calibration guard.
+    const double midOn  = render(true, 1000.0, 0.1);
+    const double midOff = render(false, 1000.0, 0.1);
+    const double midDb = 20.0 * std::log10(
+        std::max(midOn, 1e-12) / std::max(midOff, 1e-12));
+    INFO("1 kHz shift with reactive load = " << midDb << " dB");
+    REQUIRE(std::abs(midDb) < 1.5);
+
+    // At the motional resonance the load line opens — loud LF behaviour
+    // departs from the resistive model far more than the mid-band did.
+    const double lfOn  = render(true, 45.0, 0.6);
+    const double lfOff = render(false, 45.0, 0.6);
+    const double lfDb = std::abs(20.0 * std::log10(
+        std::max(lfOn, 1e-12) / std::max(lfOff, 1e-12)));
+    INFO("45 Hz level departure = " << lfDb << " dB (mid "
+         << std::abs(midDb) << " dB)");
+    REQUIRE(lfDb > std::abs(midDb) + 0.5);
 }

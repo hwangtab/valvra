@@ -4,7 +4,7 @@
 
 [![Build & Test](https://github.com/hwangtab/valvra/actions/workflows/build.yml/badge.svg)](https://github.com/hwangtab/valvra/actions/workflows/build.yml)
 [![License: GPL-3](https://img.shields.io/badge/License-GPL--3-blue.svg)](LICENSE)
-![Tests](https://img.shields.io/badge/Tests-162%2F162-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-175%2F175-brightgreen)
 ![ASAN+UBSAN](https://img.shields.io/badge/ASAN%2BUBSAN-clean-brightgreen)
 ![Formats](https://img.shields.io/badge/Formats-VST3%20|%20AU%20|%20Standalone-informational)
 ![Hidden physics](https://img.shields.io/badge/Hidden_physics-12_mechanisms-orange)
@@ -36,9 +36,21 @@ Plus:
 
 ## Status
 
-**Tier 4+ core implemented.** The DSP engine is stable and validated, the
-plugin builds as VST3/AU/Standalone, and expansion cores plus dedicated
-Compressor/Tape targets are integrated.
+**Tier 4+ core implemented · analog-physics overhaul (2026-06-12).** The DSP
+engine is stable and validated, the plugin builds as VST3/AU/Standalone, and
+expansion cores plus dedicated Compressor/Tape targets are integrated.
+
+The 2026-06 overhaul ([docs/33](docs/33-analog-physics-overhaul-2026-06-12.md))
+replaced every "static-waveshaper shortcut" found by a multi-agent physics
+audit with the real circuit mechanism: per-sample plate load-line Newton
+solves (the missing rp ∥ Rp compression and saturation-side clipping),
+implicit cathode-follower nodes (the legacy explicit loop limit-cycled),
+flux-integrated shunt-loss transformers (bass saturates first, insertion
+gain is turns-ratio unity, gapped-SE/PP-imbalance DC asymmetry), a physical
+rectifier + reservoir PSU with an auto-calibrated per-stage rail-decoupling
+ladder, charge-conserving pentode partition with suppressor collection
+gating, datasheet-recalibrated tube parameters, factor-scaled polyphase
+oversampling, and a delay-compensated true-peak limiter.
 
 - [x] Research: 25 documents, 13,000+ lines ([docs/](docs/))
 - [x] Tier 0 — core DSP: Koren + Jiles-Atherton + oversampling
@@ -49,7 +61,7 @@ Compressor/Tape targets are integrated.
 
 Current validation baseline:
 
-- `ctest`: 162/162 passing
+- `ctest`: 175/175 passing
 - `scripts/audit_checks.py`: passing
 - `scripts/validate_harmonics.py`: passing
 - `scripts/preset_harmonic_report.py`: passing
@@ -112,7 +124,7 @@ First configure pulls JUCE 8 via FetchContent (~50 s one-time).
 ### Regression
 
 ```bash
-(cd build && ctest)                            # 162 tests
+(cd build && ctest)                            # 175 tests
 python scripts/audit_checks.py                 # thread-safety + Monte Carlo
 python scripts/validate_harmonics.py           # FFT harmonic validation
 python scripts/preset_harmonic_report.py       # per-preset tone report
