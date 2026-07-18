@@ -50,9 +50,12 @@ jobs:
     # First run 29630195878 died at timeout-minutes 60 with the BUILD step
     # still compiling: a cold JUCE plugin build on the 3-core runner alone
     # eats the hour, and a cancelled job skips the cache post-step, so
-    # every retry stayed cold.  Budget must cover a full cold build+suite;
-    # ccache (below) brings warm runs down to a fraction of it.
-    timeout-minutes: 120
+    # every retry stayed cold.  Budget must cover a full cold build+suite
+    # WITH margin — the first successful cold run measured 103 min, and a
+    # timeout on a cold run never seeds the cache (post-step skipped), so
+    # an undersized budget is a permanent-cold loop, not one slow run.
+    # ccache (below) brings warm runs down to a fraction of this.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4
