@@ -39,6 +39,40 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+  # Full plugin build + the complete 200+ test suite (including the
+  # plugin stress tests that caught the feedthrough limit-cycle, the
+  # flux-loop instability and the carry-over steps — docs/35 §A2: the
+  # DSP-only job above gates barely 80% of the suite).
+  plugin-tests:
+    if: github.event_name != 'schedule'
+    runs-on: macos-14
+    name: macOS Plugin Suite
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache fetched dependencies (JUCE, chowdsp)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure CMake (plugin + full test suite)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DVALVRA_BUILD_TESTS=ON
+          -DVALVRA_BUILD_PLUGIN=ON
+          -DVALVRA_ENABLE_FIT_PIPELINE_TEST=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run full test suite
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
   fit-pipeline-smoke:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: macos-14
@@ -50,6 +84,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The fit pipeline is numpy-based (scipy optional but preferred for
+      # the least-squares stage).  The runner's python ships without them —
+      # this job failed every night on `ModuleNotFoundError: numpy` until
+      # this step existed (docs/35 §A1).
+      - name: Install Python deps (fit pipeline)
+        run: >
+          python3 -m pip install --break-system-packages numpy scipy
+          || python3 -m pip install --user numpy scipy
 
       - name: Configure CMake (CLI + fit pipeline test)
         run: >

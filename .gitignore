@@ -53,3 +53,34 @@ releases/
 *.aaxplugin
 *.pkg
 *.msi
+
+# In-source CMake leakage (all builds must use -B build; see the guard in
+# CMakeLists.txt).  These appeared once from an accidental in-source
+# configure and are ignored defensively.
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/DartConfiguration.tcl
+/Makefile
+/cmake_install.cmake
+/Testing/
+src/*/CMakeFiles/
+src/*/Makefile
+src/*/cmake_install.cmake
+src/dsp/libvalvra_dsp.a
+src/cli/valvra_process
+src/plugin/juce_vst3_helper
+tests/CMakeFiles/
+tests/Makefile
+tests/cmake_install.cmake
+tests/CTestTestfile.cmake
+tests/valvra_tests*
+tests/valvra_cli_tests*
+tests/valvra_plugin_tests*
+bench/CMakeFiles/
+bench/Makefile
+bench/cmake_install.cmake
+bench/CTestTestfile.cmake
+bench/valvra_bench
+
+# Golden-render regression fingerprints live in artifacts/golden/ (tracked)

@@ -14,6 +14,7 @@ add_executable(valvra_tests
     test_push_pull_stage.cpp
     test_compound_topologies.cpp
     test_expansion_rack.cpp
+    test_golden_render.cpp
 )
 
 target_link_libraries(valvra_tests

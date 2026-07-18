@@ -721,6 +721,16 @@ def main() -> int:
     lines.append("")
     lines.append("## Fit Score (Artifacts)")
     lines.append("")
+    lines.append(
+        "> **Scope of this score** — datasets whose source starts with "
+        "`bootstrap-from-internal` were rendered by this engine itself, so "
+        "their RMSE measures *pipeline self-consistency* (capture → fit → "
+        "verify round-trip), **not** distance to real hardware.  A 0.00000 "
+        "here is expected, not remarkable (docs/35 §B1).  Hardware truth "
+        "requires an external capture of a physical unit as the dataset "
+        "source."
+    )
+    lines.append("")
     lines.append("| Preset | Profile JSON | Dataset Source | Objective RMSE | Recommended Drive Range |")
     lines.append("|---|---|---|---:|---|")
     mode_to_preset = {
@@ -740,9 +750,12 @@ def main() -> int:
                 dr_text = f"{dr.get('min', 'n/a')} .. {dr.get('max', 'n/a')}"
                 ds = obj.get("dataset", {})
                 ds_source = str(ds.get("source", "unknown"))
+                rmse_text = f"{rmse:.5f}"
+                if ds_source.startswith("bootstrap-from-internal"):
+                    rmse_text += " (self-consistency)"
                 lines.append(
                     f"| `{preset_name}` | `{profile_json.name}` | "
-                    f"`{ds_source}` | {rmse:.5f} | {dr_text} |"
+                    f"`{ds_source}` | {rmse_text} | {dr_text} |"
                 )
             except Exception:
                 lines.append(

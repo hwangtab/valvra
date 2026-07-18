@@ -16,6 +16,14 @@ project(Valvra
     LANGUAGES C CXX
 )
 
+# Guard against in-source configures — one accidental `cmake .` scattered
+# CMakeFiles/Makefiles through src/ and tests/ (docs/35 §A3).  All builds
+# go through an out-of-source tree: cmake -B build ...
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR
+        "In-source builds are not allowed. Use: cmake -B build ${CMAKE_SOURCE_DIR}")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
