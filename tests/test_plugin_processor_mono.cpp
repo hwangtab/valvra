@@ -710,6 +710,11 @@ TEST_CASE("ValvraProcessor: neural model hot-swap keeps waveform step bounded",
     auto runScenario = [&](bool mutate)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 1);
         setChoiceParam(proc, "oversample", 2); // 4x baseline
         setFloatParam(proc, "drive", 1.1f);
@@ -1575,7 +1580,10 @@ TEST_CASE("ValvraProcessor: automation burst keeps waveform step bounded",
             if (mutate)
             {
                 if (b % 7 == 0)  proc.toggleAB();
-                if (b % 9 == 0)  proc.reroll();
+                if (b % 9 == 0)  proc.recallSeed(          // deterministic reroll:
+                    0x5EEDBA5EULL             // same pendingSeed handoff +
+                    ^ (0x9E3779B97F4A7C15ULL  // crossfade path as reroll(),
+                       * static_cast<std::uint64_t>(b + 1))); // minus the wall clock
                 if (b % 11 == 0) proc.copyToInactiveSlot();
                 if (b % 13 == 0) setChoiceParam(proc, "msMode", (b / 13) % 2);
                 if (b % 17 == 0) setChoiceParam(proc, "oversample", (b / 17) % 5);
@@ -1628,6 +1636,11 @@ TEST_CASE("ValvraProcessor: null-test continuity survives oversample switches",
     auto runScenario = [&](bool mutateOversample)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 0);
         setChoiceParam(proc, "oversample", 2); // 4x baseline
         setFloatParam(proc, "drive", 1.0f);
@@ -1713,6 +1726,11 @@ TEST_CASE("ValvraProcessor: latency switch with bypass/null-test stays stable",
     auto runScenario = [&](bool mutate)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 1);
         setChoiceParam(proc, "oversample", 2); // 4x baseline
         setFloatParam(proc, "drive", 1.0f);
@@ -1810,6 +1828,11 @@ TEST_CASE("ValvraProcessor: TP mode switching keeps waveform continuity",
     auto runScenario = [&](bool mutateTp)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 1);
         setChoiceParam(proc, "oversample", 2); // 4x baseline
         setFloatParam(proc, "drive", 1.0f);
@@ -1905,6 +1928,11 @@ TEST_CASE("ValvraProcessor: AB toggle with TP mode switching stays continuous",
     auto runScenario = [&](bool mutate)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 1);
         setChoiceParam(proc, "oversample", 2);
         setFloatParam(proc, "drive", 1.0f);
@@ -2006,6 +2034,11 @@ TEST_CASE("ValvraProcessor: factory-load plus reroll stays continuous",
     auto runScenario = [&](bool mutate)
     {
         valvra::ValvraProcessor proc;
+        // Pin the Monte-Carlo unit: the constructor seeds from the wall
+        // clock (each instance = a unique unit, by design), so an unpinned
+        // threshold assert samples a random unit per run and flakes on
+        // unlucky draws (first seen: CI run 29635024200).
+        proc.recallSeed(0x5EEDBA5EULL);
         setChoiceParam(proc, "preset", 0);
         setChoiceParam(proc, "oversample", 2);
         setFloatParam(proc, "drive", 1.0f);
@@ -2045,7 +2078,10 @@ TEST_CASE("ValvraProcessor: factory-load plus reroll stays continuous",
                     sawFactoryLoad = true;
                 }
                 if (b % 9 == 0)
-                    proc.reroll();
+                    proc.recallSeed(          // deterministic reroll:
+                        0x5EEDBA5EULL             // same pendingSeed handoff +
+                        ^ (0x9E3779B97F4A7C15ULL  // crossfade path as reroll(),
+                           * static_cast<std::uint64_t>(b + 1))); // minus the wall clock
                 if (b % 12 == 0)
                     setChoiceParam(proc, "oversample", (b / 12) % 5);
                 if (b % 14 == 0)
