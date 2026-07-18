@@ -47,10 +47,29 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: macos-14
     name: macOS Plugin Suite
-    timeout-minutes: 60
+    # First run 29630195878 died at timeout-minutes 60 with the BUILD step
+    # still compiling: a cold JUCE plugin build on the 3-core runner alone
+    # eats the hour, and a cancelled job skips the cache post-step, so
+    # every retry stayed cold.  Budget must cover a full cold build+suite;
+    # ccache (below) brings warm runs down to a fraction of it.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
+
+      # The expensive part is COMPILING JUCE/chowdsp, not cloning them
+      # (configure incl. fetch is ~1 min).  ccache keyed per-commit with a
+      # prefix restore-key always starts from the newest prior cache and
+      # always saves a fresh one on success.
+      - name: Install ccache
+        run: brew install ccache
+
+      - name: Cache compiler cache (ccache)
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-plugin-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-plugin-${{ runner.os }}-
 
       - name: Cache fetched dependencies (JUCE, chowdsp)
         uses: actions/cache@v4
@@ -62,6 +81,8 @@ jobs:
         run: >
           cmake -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DVALVRA_BUILD_TESTS=ON
           -DVALVRA_BUILD_PLUGIN=ON
           -DVALVRA_ENABLE_FIT_PIPELINE_TEST=OFF
@@ -69,9 +90,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # The plugin_stress label is ~31 CPU-minutes of serial render time;
+      # spread it across the runner's cores.  Tests are deterministic DSP
+      # asserts (no wall-clock assertions), so parallel execution is safe.
       - name: Run full test suite
         working-directory: build
-        run: ctest --output-on-failure -C Release
+        run: ctest --output-on-failure -C Release --parallel 3
 
   fit-pipeline-smoke:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
