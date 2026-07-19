@@ -703,41 +703,10 @@ public:
         }
 
         // ─── Rail-decoupling ladder calibration ─────────────────────────
-        // Each stage's B+ node is fed through a dropper R + reservoir C.
-        // The droppers are auto-sized so every node RESTS exactly at the
-        // stage's documented Vp_nominal — i.e. the preset's published
-        // operating voltages become the actual steady-state node values,
-        // and sag/ripple/inter-stage coupling happen physically around
-        // them.  (Legacy: every stage was bolted to the raw PSU value,
-        // which matched no preset's documented node voltage.)
-        {
-            const double vbRest = config_.psu.Vb_nominal;
-            const double cDec = std::max(config_.decouplingC, 1.0e-9);
-            double cumI = 0.0;
-            for (int i = 0; i < config_.numStages; ++i)
-                cumI += stages_[static_cast<std::size_t>(i)]
-                            .restingPlateCurrent();
-            double nodeAbove = vbRest;
-            for (int i = config_.numStages - 1; i >= 0; --i)
-            {
-                const auto idx = static_cast<std::size_t>(i);
-                const double want = config_.stages[idx].Vp_nominal;
-                const double drop = std::max(0.0, nodeAbove - want);
-                decouplingRCalib_[idx] = (cumI > 1.0e-9)
-                    ? drop / cumI : 0.0;
-                // Node time constant from the calibrated dropper (the
-                // config floor keeps zero-drop nodes lightly filtered
-                // rather than bit-exact copies of the node above).
-                const double rEff = std::max(decouplingRCalib_[idx],
-                                             std::max(config_.decouplingR,
-                                                      10.0));
-                decouplingAlphaCalib_[idx] =
-                    1.0 - std::exp(-1.0 / (rEff * cDec * sampleRate));
-                railNodes_[idx] = std::min(nodeAbove, want);
-                nodeAbove = railNodes_[idx];
-                cumI -= stages_[idx].restingPlateCurrent();
-            }
-        }
+        // Moved below: the ladder anchor needs the PSU's LOADED rest
+        // output, which is only known after the PSU (and the push-pull
+        // stage, whose draw loads it) is set up — see the block after
+        // pushPull_.setup() (docs/35 §S2 D-A).
 
         // PSU — apply chain-wide Monte Carlo to rail level, impedance,
         // and 120 Hz ripple amplitude.
@@ -838,6 +807,78 @@ public:
                 ppCfg.Vg_bias = 0.5 * (lo + hi);
             }
             pushPull_.setup(ppCfg, sampleRate);
+        }
+
+        // ─── Loaded-rail settle + rail-decoupling ladder calibration ─────
+        // Each stage's B+ node is fed through a dropper R + reservoir C,
+        // auto-sized so every node RESTS exactly at the stage's documented
+        // Vp_nominal.  The anchor must be the PSU's output AT THE CHAIN'S
+        // QUIESCENT DRAW: anchoring on the no-load Vb_nominal left every
+        // node a few percent low at equilibrium, which the rail-tracking
+        // screen supply amplified into a ~20 V screen-node offset on the
+        // near-critical 6AS6 (1/(1+Rs·dIg2/dVg2) sensitivity) — the
+        // rest-vs-runtime divergence of docs/35 §S2 D-A.
+        {
+            double restDraw = 0.0;
+            for (int i = 0; i < config_.numStages; ++i)
+            {
+                const auto idx = static_cast<std::size_t>(i);
+                restDraw += stages_[idx].restingPlateCurrent()
+                          + stages_[idx].restingScreenCurrent();
+            }
+            if (config_.usePushPullOutputStage)
+                restDraw += pushPull_.restingPlateCurrent();
+
+            double vbRest = config_.psu.Vb_nominal;
+            if (config_.enablePSUSag)
+            {
+                // Settle the reservoir/sag ODE at the quiescent draw and
+                // anchor on the ripple-mean of the final 0.1 s.  The PSU
+                // is deliberately left in this settled state so t=0
+                // matches the anchors (no cold-start rail transient).
+                const int settleN = static_cast<int>(sampleRate);
+                const int meanN = std::max(1,
+                    static_cast<int>(0.1 * sampleRate));
+                double acc = 0.0;
+                for (int n = 0; n < settleN; ++n)
+                {
+                    const double v = psu_.process(restDraw);
+                    if (n >= settleN - meanN) acc += v;
+                }
+                if (std::isfinite(acc) && acc > 0.0)
+                    vbRest = acc / static_cast<double>(meanN);
+            }
+
+            const double cDec = std::max(config_.decouplingC, 1.0e-9);
+            // Plate AND screen current leave through the same node.
+            const auto restingNodeCurrent = [this](std::size_t idx) noexcept
+            {
+                return stages_[idx].restingPlateCurrent()
+                     + stages_[idx].restingScreenCurrent();
+            };
+            double cumI = 0.0;
+            for (int i = 0; i < config_.numStages; ++i)
+                cumI += restingNodeCurrent(static_cast<std::size_t>(i));
+            double nodeAbove = vbRest;
+            for (int i = config_.numStages - 1; i >= 0; --i)
+            {
+                const auto idx = static_cast<std::size_t>(i);
+                const double want = config_.stages[idx].Vp_nominal;
+                const double drop = std::max(0.0, nodeAbove - want);
+                decouplingRCalib_[idx] = (cumI > 1.0e-9)
+                    ? drop / cumI : 0.0;
+                // Node time constant from the calibrated dropper (the
+                // config floor keeps zero-drop nodes lightly filtered
+                // rather than bit-exact copies of the node above).
+                const double rEff = std::max(decouplingRCalib_[idx],
+                                             std::max(config_.decouplingR,
+                                                      10.0));
+                decouplingAlphaCalib_[idx] =
+                    1.0 - std::exp(-1.0 / (rEff * cDec * sampleRate));
+                railNodes_[idx] = std::min(nodeAbove, want);
+                nodeAbove = railNodes_[idx];
+                cumI -= restingNodeCurrent(idx);
+            }
         }
 
         // Transformers — full Jiles-Atherton + physical rolloffs + per-
@@ -1268,7 +1309,12 @@ public:
                 double acc = 0.0;
                 for (int i = 0; i < cfg.numStages; ++i)
                 {
-                    acc += stages[static_cast<std::size_t>(i)].lastPlateCurrent();
+                    // Plate AND screen current: both leave through the
+                    // stage's B+ node.  Must match the rest-time dropper
+                    // calibration, which budgets Ip + Ig2 (docs/35 D-A).
+                    const auto idx2 = static_cast<std::size_t>(i);
+                    acc += stages[idx2].lastPlateCurrent()
+                         + stages[idx2].lastScreenCurrent();
                     prefixI[i] = acc;
                 }
                 double nodeAbove = Vb;
@@ -1305,7 +1351,8 @@ public:
                         stages[static_cast<std::size_t>(i - 1)]
                             .lastOutputImpedance());
                 stageOutput = stages[idx].process(stageOutput, VbStage);
-                totalIp += stages[idx].lastPlateCurrent();
+                totalIp += stages[idx].lastPlateCurrent()
+                         + stages[idx].lastScreenCurrent();
                 const double blockingMemory = stages[idx].blockingMemoryDrive();
                 const double thermalMemory = stages[idx].thermalMemoryDrive();
                 const double cathodeStress = stages[idx].cathodeStressDrive();
@@ -1600,6 +1647,9 @@ public:
     }
     TubeStage& stage(int i) noexcept { return stages_[static_cast<std::size_t>(i)]; }
     const TubeStage& stage(int i) const noexcept { return stages_[static_cast<std::size_t>(i)]; }
+    /// Read-only view of the output transformer — for the OPT deep-
+    /// saturation guards (docs/35 §S2 D-B).
+    const TransformerStage& outputTransformer() const noexcept { return outputTrafo_; }
     int numStages() const noexcept { return config_.numStages; }
 
     /// Line frequency this instance's mains-derived textures (heater hum,

@@ -1,6 +1,6 @@
 # Practical Mix/Master Readiness Report
 
-- Generated: 2026-07-18 13:11:31 
+- Generated: 2026-07-19 17:21:44 
 - Command: `python3 scripts/practical_readiness_report.py`
 - Engine: `valvra_process` @ 48 kHz
 

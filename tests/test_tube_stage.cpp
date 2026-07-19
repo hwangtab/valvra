@@ -253,9 +253,15 @@ TEST_CASE("TubeStage: pentode screen node droops under heavy drive",
     stage.setup(cfg, kSampleRate);
 
     const double screenAtRest = stage.lastScreenVoltage();
+    // Drive amplitude picked where the droop mechanism genuinely lives:
+    // at 0.9 the Ig2 average barely moves (± a tenth of a volt, sign
+    // depending on the curve corner — the old expectation only held
+    // because the rest anchor sat ~20 V above the true equilibrium,
+    // docs/35 §S2 D-A), while at 2.0 the plate bottoms every cycle and
+    // the screen genuinely takes the duty-cycle hit.
     for (int i = 0; i < 48000; ++i)
     {
-        const double x = 0.9 * std::sin(2.0 * std::numbers::pi * 220.0
+        const double x = 2.0 * std::sin(2.0 * std::numbers::pi * 220.0
                                       * (static_cast<double>(i) / kSampleRate));
         (void) stage.process(x, cfg.Vp_nominal);
     }
@@ -263,7 +269,7 @@ TEST_CASE("TubeStage: pentode screen node droops under heavy drive",
     const double screenDriven = stage.lastScreenVoltage();
     REQUIRE(std::isfinite(screenAtRest));
     REQUIRE(std::isfinite(screenDriven));
-    REQUIRE(screenDriven < screenAtRest);
+    REQUIRE(screenDriven < screenAtRest - 0.05);
     REQUIRE(stage.lastScreenCurrent() > 0.0);
 }
 

@@ -268,15 +268,25 @@ TEST_CASE("TubeAmpChain: same seed is fully reproducible", "[chain][variation]")
 TEST_CASE("TubeAmpChain: PSU sag active under sustained loud signal",
           "[chain][psu][sensational]")
 {
-    auto cfg = chain_presets::V72Preamp();
+    // Class-AB push-pull: the only topology whose AVERAGE draw genuinely
+    // rises with drive (per-side conduction grows), so the rail must sag.
+    // The previous V72 (class-A) variant passed only through a cold-start
+    // artifact: the PSU used to start at the no-load nominal and drift
+    // down DURING the measurement.  Since the loaded-rail settle
+    // (docs/35 §S2 D-A) the PSU starts at its quiescent equilibrium and
+    // a class-A chain's loud-signal draw actually dips slightly.
+    auto cfg = chain_presets::MarshallMode();
     cfg.psu = psu_presets::k5U4GB;  // stronger sag for easier detection
     cfg.enablePSUSag = true;
 
     TubeAmpChain chain;
     chain.setup(cfg, kSampleRate);
 
-    // Let it settle quiet
-    for (int i = 0; i < 5000; ++i) chain.process(0.0);
+    // Let it settle quiet — PAST the warm-up thump: the cold-start
+    // emission ramp pushes a DC transient through the PP/OPT for a few
+    // hundred ms, and reading the "quiet" rail inside that window
+    // records the thump's draw, not the quiescent state.
+    for (int i = 0; i < 24000; ++i) chain.process(0.0);
 
     const double vb_quiet = chain.currentVb();
     const double sag_quiet = chain.currentSagPercent();
@@ -1600,6 +1610,53 @@ TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
     for (double v : pVn) REQUIRE(std::isfinite(v));
 }
 
+TEST_CASE("TubeAmpChain: pentode rest anchor matches the runtime screen equilibrium",
+          "[chain][cv][defect-guard]")
+{
+    // docs/35 §S2 D-A: the setup rest point once solved a colder-grid
+    // operating point than the runtime map (full-Vk grid subtraction,
+    // no-load rail anchor, unscaled warm-up screen current) — a ~17 V
+    // standing screen offset on CV's near-critical 6AS6.  Guard: with
+    // warm-up disabled (so the comparison is at the anchor's own warm
+    // state) the settled screen node must stay near the reported rest.
+    auto cfg = chain_presets::CultureVultureMode();
+    cfg.variationSeed = 0x1111'2222ULL;
+    for (int i = 0; i < cfg.numStages; ++i)
+        cfg.stages[static_cast<std::size_t>(i)].enableWarmup = false;
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+    const double vg2Rest = chain.stage(1).screenNodeVoltage();
+    for (int n = 0; n < static_cast<int>(2.0 * kSampleRate); ++n)
+        chain.process(0.0);
+    const double vg2Settled = chain.stage(1).screenNodeVoltage();
+    INFO("rest Vg2 = " << vg2Rest << ", settled Vg2 = " << vg2Settled);
+    REQUIRE(std::abs(vg2Settled - vg2Rest) < 3.0);
+}
+
+TEST_CASE("TubeAmpChain: OPT recovers from the warm-up DC transient (no deep-saturation latch)",
+          "[chain][cv][defect-guard]")
+{
+    // docs/35 §S2 D-B: seed 777's core, kicked by the (physical) warm-up
+    // DC thump, once latched into a period-2 solver limit cycle at the
+    // JA field rail (|y| ≈ 60 alternating, forever).  With the flux
+    // solver's trust region the core rides deep saturation and RECOVERS
+    // as the transient drains.  Guard: silence must settle to silence.
+    auto cfg = chain_presets::CultureVultureMode();
+    cfg.variationSeed = 777;
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+    double y = 0.0;
+    for (int n = 0; n < static_cast<int>(2.0 * kSampleRate); ++n)
+        y = chain.process(0.0);
+    INFO("output after 2 s of silence = " << y
+         << ", solved H = " << chain.outputTransformer().solvedFieldH());
+    REQUIRE(std::abs(y) < 0.01);
+    // And the field must be draining back toward the rail interior,
+    // not parked at a runaway magnitude.
+    REQUIRE(std::abs(chain.outputTransformer().solvedFieldH())
+            < 64.0 * 200.0);   // generous: well under any runaway scale
+}
+
 TEST_CASE("TubeAmpChain: seed nulls stay in the audible-individuality band",
           "[chain][seednull]")
 {
@@ -1609,16 +1666,13 @@ TEST_CASE("TubeAmpChain: seed nulls stay in the audible-individuality band",
     // −10 dB of the reference).  That measurement went stale during the
     // docs/34 waves — this guard makes it permanent (docs/35 §B2).
     struct P { const char* name; int idx; };
-    // CV is EXCLUDED for now: its bare-chain output at this drive is
-    // noise-dominated (the hot OPT core deep-limits the cascade) so the
-    // null measures decorrelated noise, and specific Monte-Carlo corners
-    // expose two real engine defects filed in docs/35 §S2 (bistable
-    // screen-starved 6AS6 quiescent whose rest anchor diverges from the
-    // runtime equilibrium, and the OPT's Nyquist limit cycle at the JA
-    // field rail under the resulting sustained DC).  Re-admit CV here as
-    // part of that dedicated fix cycle.
-    static const P presets[4] = {
-        { "v72", 0 }, { "console", 1 },
+    // CV re-admitted after the docs/35 §S2 D-A/D-B fix cycle: with the
+    // pentode rest anchor consistent with the runtime screen equilibrium
+    // and the OPT flux solver trust-region capped, the CV bare chain
+    // passes signal at a healthy level (rms 0.116 vs the broken 0.0009)
+    // and meets all three criteria below.
+    static const P presets[5] = {
+        { "v72", 0 }, { "console", 1 }, { "cv", 2 },
         { "rndi", 3 }, { "hifi", 4 } };
 
     auto build = [&](int idx, std::uint64_t seed) {

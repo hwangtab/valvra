@@ -623,7 +623,7 @@ public:
             if (cfg.enablePentodeModel)
             {
                 const double Va  = std::max(2.0, Vp_rest_ - Vk_rest_);
-                const double Vg1 = cfg.Vg_bias - Vk_rest_;
+                const double Vg1 = cfg.Vg_bias;   // net convention, as in process()
                 const double Vg3 = cfg.suppressorTieToCathode
                     ? 0.0 : (cfg.suppressorBiasVolts - Vk_rest_);
                 constexpr double h = 1.0;
@@ -1334,8 +1334,14 @@ public:
             Ip = std::max(0.0, (VaTarget - Va)
                                / std::max(config_.Rp, 1.0)
                                / std::max(warmupCurrent_, 1.0e-3));
-            lastScreenCurrent_ = pent.Ig2;
-            lastGridCurrent_   = std::max(0.0, pent.Ig1);
+            // Warm-up is cathode-emission limiting, so it scales EVERY
+            // electrode current, not just the plate.  Leaving Ig2 at full
+            // amplitude while Ip ran at warm·Ip let the screen node sag
+            // onto the lower branch of the bistable 6AS6 landscape during
+            // warm-up and lock there — a ~17 V standing offset against the
+            // (warm=1) rest calibration (docs/35 §S2 D-A).
+            lastScreenCurrent_ = warmupCurrent_ * pent.Ig2;
+            lastGridCurrent_   = warmupCurrent_ * std::max(0.0, pent.Ig1);
 
             // Operating-point hand-off for the Miller model and the
             // dynamic output impedance given to the next stage — the
@@ -1791,6 +1797,20 @@ public:
     double lastScreenVoltage() const noexcept { return screenNodeV_; }
     double restingPlateCurrent() const noexcept { return Ip_rest_; }
     double restingPlateVoltage() const noexcept { return Vp_rest_; }
+    /// Live screen-grid node voltage (pentode path; supply volts otherwise).
+    /// Exposed for the rest-vs-runtime consistency guards (docs/35 §S2 D-A).
+    double screenNodeVoltage() const noexcept { return screenNodeV_; }
+    /// Quiescent screen-grid current [A].  Right after setup() this holds
+    /// the rest-point Ig2 from solvePentodeRestPoint (0 for non-pentode
+    /// stages).  The rail-ladder calibration must budget for it: a
+    /// screen-starved pentode (CV's 6AS6) draws 15–20× its plate current
+    /// through the SAME B+ node, and a dropper sized on plate current
+    /// alone leaves that node tens of volts under its documented rest
+    /// voltage (docs/35 §S2 D-A).
+    double restingScreenCurrent() const noexcept
+    {
+        return std::max(0.0, lastScreenCurrent_);
+    }
     double blockingMemoryVolts() const noexcept
     {
         return std::max(0.0, gridChargeFastV_ + gridChargeSlowV_);
@@ -2022,22 +2042,47 @@ private:
         if (config_.pentodeTriodeStrap)
             return std::max(0.0, Va);
 
-        // Bisection on r(Vg2) = Vg2 − (supply − Ig2(Vg2)·Rs).  Both terms
-        // rise with Vg2, so r is monotone — the previous damped relaxation
-        // oscillated whenever Rs·dIg2/dVg2 approached 1 and reported a
-        // screen voltage inconsistent with its own screen current.
+        // Root of r(Vg2) = Vg2 − (supply − Ig2(Vg2)·Rs).  r is NOT always
+        // monotone: in the 6AS6-class dynatron region Rs·dIg2/dVg2 < −1
+        // bends it into stable/unstable/stable root triplets, and a naive
+        // full-range bisection converges to the UNSTABLE middle root — the
+        // runtime screen RC then walks ~20 V away from the reported rest
+        // (docs/35 §S2 D-A).  The physical quiescent is the root reached at
+        // power-up, when the bypass cap charges from 0 V: the FIRST upward
+        // crossing of r from below.  Scan up for that bracket, bisect
+        // inside it; for monotone tubes the first crossing is the only
+        // root, so healthy presets keep their old rest point.
         const double Rs = std::max(config_.screenResistorOhms, 1.0);
+        const double hiEnd = std::max(1.0, config_.screenSupplyVolts);
+        const auto residual = [&](double v) noexcept
+        {
+            const auto p = pentode_.evaluate(Va, Vg1, v, Vg3);
+            return v - (config_.screenSupplyVolts
+                        - std::max(0.0, p.Ig2) * Rs);
+        };
+        constexpr int kScan = 32;
         double lo = 0.0;
-        double hi = std::max(1.0, config_.screenSupplyVolts);
+        double hi = hiEnd;
+        double rPrev = residual(0.0);
+        for (int i = 1; i <= kScan; ++i)
+        {
+            const double v = hiEnd * static_cast<double>(i)
+                           / static_cast<double>(kScan);
+            const double rv = residual(v);
+            if (rPrev < 0.0 && rv >= 0.0)
+            {
+                lo = hiEnd * static_cast<double>(i - 1)
+                   / static_cast<double>(kScan);
+                hi = v;
+                break;
+            }
+            rPrev = rv;
+        }
         double Vg2 = hi;
         for (int it = 0; it < 40; ++it)
         {
             Vg2 = 0.5 * (lo + hi);
-            const auto p = pentode_.evaluate(Va, Vg1, Vg2, Vg3);
-            const double r = Vg2
-                - (config_.screenSupplyVolts
-                   - std::max(0.0, p.Ig2) * Rs);
-            if (r > 0.0) hi = Vg2; else lo = Vg2;
+            if (residual(Vg2) > 0.0) hi = Vg2; else lo = Vg2;
         }
         return Vg2;
     }
@@ -2057,7 +2102,15 @@ private:
         double Vg2 = config_.screenSupplyVolts;
         for (int it = 0; it < 16; ++it)
         {
-            const double Vg1 = config_.Vg_bias - Vk;
+            // GRID CONVENTION (docs/35 §S2 D-A): the runtime treats
+            // config_.Vg_bias as the NET grid-cathode bias at rest — the
+            // cathode enters the live grid only as a DEVIATION (deltaVk).
+            // The rest solver must match, or it solves a colder-grid
+            // operating point than the machine actually runs (on the
+            // near-critical 6AS6 screen node, the −Vk_rest ≈ −1 V error
+            // mapped to a +15 V screen-voltage error).  Vg3 and the plate
+            // target keep the full Vk subtraction — exactly like process().
+            const double Vg1 = config_.Vg_bias;
             const double Vg3 = config_.suppressorTieToCathode
                 ? 0.0
                 : (config_.suppressorBiasVolts - Vk);
@@ -2102,7 +2155,7 @@ private:
         screenNodeV_ = std::max(0.0, Vg2);
         lastScreenCurrent_ = pentode_.evaluate(
             std::max(0.0, Vp_rest_ - Vk_rest_),
-            config_.Vg_bias - Vk_rest_,
+            config_.Vg_bias,
             screenNodeV_,
             config_.suppressorTieToCathode ? 0.0 : (config_.suppressorBiasVolts - Vk_rest_)
         ).Ig2;
@@ -2122,7 +2175,7 @@ private:
             const double Vg2 = config_.pentodeTriodeStrap
                 ? Va
                 : std::max(0.0, screenNodeV_);
-            const double Vg1Rest = config_.Vg_bias - Vk_rest_;
+            const double Vg1Rest = config_.Vg_bias;   // net convention
             constexpr double h = 1.0e-3;
             const double ip1 = pentode_.evaluate(Va, Vg1Rest + h, Vg2, Vg3).Ip;
             const double ip0 = pentode_.evaluate(Va, Vg1Rest - h, Vg2, Vg3).Ip;

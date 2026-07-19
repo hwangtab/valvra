@@ -426,6 +426,20 @@ public:
                 hIt = hUsed; gIt = g;
                 h = hUsed - g / slope;
                 if (! std::isfinite(h)) { h = hPrev_; break; }
+                // Trust region: cap each iterate to one saturation span.
+                // The residual is monotone in h, so capped steps still
+                // reach the (unique) root — the warm start carries the
+                // progress across samples.  WITHOUT the cap, the secant
+                // slope goes near-flat in deep saturation (dM/dh → 0),
+                // one step flings h to ±10× the JA state rail, and the
+                // solver itself settles into a period-2 Nyquist cycle
+                // (|y| ≈ 60 alternating) that outlives the DC transient
+                // that caused it — the absorbing latch of docs/35 §S2
+                // D-B.  This caps the STEP, not the value: legitimate
+                // deep-saturation solutions beyond the rail remain
+                // reachable, unlike the reverted absolute h-clamp.
+                const double maxStep = 64.0 * config_.ja.a;
+                h = std::clamp(h, hUsed - maxStep, hUsed + maxStep);
             }
             // Commit the LAST TRIAL state directly — re-running step()
             // on the live state would duplicate a full RK4 pass per
@@ -504,6 +518,11 @@ public:
     // Diagnostics — current magnetization (for B-H loop visualization UI)
     double currentM() const noexcept { return M_prev_; }
     double currentH() const noexcept { return ja_.currentH(); }
+    /// Solved (unclamped) magnetizing field from the implicit flux loop —
+    /// deep-saturation guards, docs/35 §S2 D-B.
+    double solvedFieldH() const noexcept { return hPrev_; }
+    /// Core flux integrator state (same guards).
+    double coreFlux() const noexcept { return flux_; }
     double currentMsat() const noexcept { return config_.ja.Ms; }
     const JilesAtherton& ja() const noexcept { return ja_; }
 
