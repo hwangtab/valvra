@@ -632,7 +632,18 @@ public:
                 const double i1 = pentode_.evaluate(Va + h, Vg1, vg2Hi, Vg3).Ip;
                 const double i0 = pentode_.evaluate(Va - h, Vg1, vg2Lo, Vg3).Ip;
                 const double g  = std::max(0.0, (i1 - i0) / (2.0 * h));
-                outputMakeup_ = 1.0 + cfg.Rp * g;
+                // Signal load = Rp ∥ Rg_next (docs/34 §3.8, extended to
+                // the pentode path — docs/35 C2).  Level preserved:
+                // makeup = av_legacy / av_physical
+                //        = (gm·Rp) / (gm·rAc/(1 + rAc·g))
+                //        = (Rp/rAc)·(1 + rAc·g).
+                const double rAc = (! cfg.plateLoadIsTransformer
+                                    && cfg.nextStageLoadR > 1.0)
+                    ? cfg.Rp * cfg.nextStageLoadR
+                      / (cfg.Rp + cfg.nextStageLoadR)
+                    : cfg.Rp;
+                outputMakeup_ = (cfg.Rp / std::max(rAc, 1.0))
+                              * (1.0 + rAc * g);
             }
             else
             {
@@ -1303,6 +1314,19 @@ public:
             // to the clamp floor on steep triode-strapped curves.
             KorenPentode::Currents pent {};
             const double VaTarget = std::max(1.0, Vb_plus - Vk_full);
+            // Next-stage grid-leak AC loading (docs/34 §3.8, pentode
+            // extension — docs/35 C2): DC anchors through the full Rp,
+            // the signal load line is Rp ∥ Rg.  Thevenin pivot around
+            // the standing current keeps the rest point untouched and
+            // preserves dVa/dVb = 1 for slow rail moves.
+            const double rgNextP = (! config_.plateLoadIsTransformer
+                                    && config_.nextStageLoadR > 1.0)
+                ? config_.nextStageLoadR : 0.0;
+            const double rAcP = (rgNextP > 0.0)
+                ? config_.Rp * rgNextP / (config_.Rp + rgNextP)
+                : config_.Rp;
+            const double vaAnchor = std::max(1.0,
+                VaTarget - (config_.Rp - rAcP) * Ip_rest_);
             // Exact Newton using KorenPentode's analytic ∂Ip/∂Va.  The old
             // cross-sample secant was excellent for slow (steady-state)
             // input but took extra iterations on noisy/transient material,
@@ -1315,10 +1339,10 @@ public:
                     Vg2 = Va;
                 pent = pentode_.evaluate(Va, Vg, Vg2, Vg3);
                 const double g = Va
-                    + warmupCurrent_ * std::max(0.0, pent.Ip) * config_.Rp
-                    - VaTarget;
+                    + warmupCurrent_ * std::max(0.0, pent.Ip) * rAcP
+                    - vaAnchor;
                 const double slope = std::clamp(
-                    1.0 + warmupCurrent_ * config_.Rp
+                    1.0 + warmupCurrent_ * rAcP
                         * std::max(0.0, pent.dIpdVa),
                     1.0, 1.0e12);
                 pentSlope_ = slope;
@@ -1331,8 +1355,8 @@ public:
             // Plate current from the circuit side of the converged node
             // (exact KCL, no extra pentode evaluation); the screen RC
             // uses the last in-loop Ig2, half a Newton step stale.
-            Ip = std::max(0.0, (VaTarget - Va)
-                               / std::max(config_.Rp, 1.0)
+            Ip = std::max(0.0, (vaAnchor - Va)
+                               / std::max(rAcP, 1.0)
                                / std::max(warmupCurrent_, 1.0e-3));
             // Warm-up is cathode-emission limiting, so it scales EVERY
             // electrode current, not just the plate.  Leaving Ig2 at full

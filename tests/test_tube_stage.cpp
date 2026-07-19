@@ -17,6 +17,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "TubeStage.h"
+#include "TubeAmpChain.h"   // chain_presets for the Rg load-line guard
 
 #include <cmath>
 #include <numbers>
@@ -242,6 +243,73 @@ TEST_CASE("TubeStage: Culture Vulture T/P1/P2 core voicings are distinct",
     REQUIRE(p2 > 0.0);
     REQUIRE(std::abs(triode - p1) > 0.01);
     REQUIRE(std::abs(p2 - p1) > 0.01);
+}
+
+TEST_CASE("TubeStage: pentode next-stage Rg reshapes the load line, level preserved",
+          "[TubeStage][pentode][rg-load]")
+{
+    // docs/35 C2: the next stage's grid-leak is part of the AC plate
+    // load for pentode CC stages too.  The makeup factor must absorb
+    // the small-signal level change (physics-first policy), while the
+    // load-line curvature — what the mechanism is FOR — must move.
+    auto render = [&](double rgNext, double amp)
+    {
+        TubeStage stage;
+        // V72's EF86-class input pentode: enough standing current that
+        // the plate genuinely traverses the load line (the starved CV
+        // core clips by current starvation instead, where the load line
+        // is pure gain and the makeup absorbs it completely).
+        auto cfg = chain_presets::V72Preamp().stages[0];
+        cfg.enableWarmup = false;
+        cfg.enableShotNoise = false;
+        cfg.enableHeaterHum = false;
+        cfg.nextStageLoadR = rgNext;
+        stage.setup(cfg, kSampleRate);
+        std::vector<double> y;
+        const int N = 24000, skip = 12000;
+        y.reserve(static_cast<std::size_t>(N - skip));
+        for (int i = 0; i < N; ++i)
+        {
+            const double x = amp * std::sin(2.0 * std::numbers::pi * 220.0
+                                          * (static_cast<double>(i) / kSampleRate));
+            const double out = stage.process(x, cfg.Vp_nominal);
+            if (i >= skip) y.push_back(out);
+        }
+        return y;
+    };
+    auto rms = [](const std::vector<double>& y) {
+        double acc = 0.0;
+        for (double v : y) acc += v * v;
+        return std::sqrt(acc / static_cast<double>(y.size()));
+    };
+    auto bin = [&](const std::vector<double>& y, double freq) {
+        double re = 0.0, im = 0.0;
+        const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
+        for (std::size_t i = 0; i < y.size(); ++i)
+        {
+            re += y[i] * std::cos(w * static_cast<double>(i));
+            im += y[i] * std::sin(w * static_cast<double>(i));
+        }
+        return std::sqrt(re * re + im * im) / static_cast<double>(y.size());
+    };
+
+    // Small signal: level calibration must hold across the Rg change.
+    const double lvlOpen = rms(render(0.0, 0.05));
+    const double lvlLoad = rms(render(220.0e3, 0.05));
+    const double lvlDeltaDb = 20.0 * std::log10(lvlLoad / lvlOpen);
+    INFO("small-signal level delta = " << lvlDeltaDb << " dB");
+    REQUIRE(std::abs(lvlDeltaDb) < 0.5);
+
+    // Large signal: the reshaped load line must move the harmonic mix.
+    const auto hotOpen = render(0.0, 1.5);
+    const auto hotLoad = render(220.0e3, 1.5);
+    // H2/H1 measured 0.099 open vs 0.228 loaded at this drive — the
+    // threshold below only asserts a clear, not knife-edge, separation.
+    const double h2Open = bin(hotOpen, 440.0) / std::max(bin(hotOpen, 220.0), 1e-12);
+    const double h2Load = bin(hotLoad, 440.0) / std::max(bin(hotLoad, 220.0), 1e-12);
+    INFO("H2/H1 open = " << h2Open << ", loaded = " << h2Load);
+    REQUIRE(std::abs(20.0 * std::log10(std::max(h2Load, 1e-9)
+                                       / std::max(h2Open, 1e-9))) > 2.0);
 }
 
 TEST_CASE("TubeStage: pentode screen node droops under heavy drive",
