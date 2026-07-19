@@ -76,7 +76,7 @@
 
 ### D. 성능 / RT (P2)
 
-- **D1.** 리빌드·carry·리롤이 체인을 통째 값 복사 — `variationCache_`(std::vector)가 **오디오 스레드에서 할당**(setup의 clear/reserve 포함, 기존 관행이나 구조적 해소 가능: `std::array<ComponentVariation, kMaxStages>` 전환으로 전 경로 무할당).
+- **D1.** ~~`variationCache_`(std::vector)가 오디오 스레드에서 할당~~ → **✅ 해결(2026-07-19)**: 고정 `std::array<ComponentVariation, kMaxStages>` + count 전환. 체인 오브젝트 그래프 전체가 힙 멤버 제로가 되어 값 복사(carry 스냅샷)까지 무할당 — `static_assert(is_trivially_copyable_v<TubeAmpChain>)` 컴파일 타임 가드로 고정(34KB 평탄 객체, 복사=memcpy).
 - **D2.** CV 4×(~106%)·V72 8×(~113–120%) 1코어 실시간 잔여 초과(docs/33부터의 공지 상태, 멀티코어 실용). 잔여 최적화 후보: 펜토드 `evaluate()` pow 축약, 다운샘플러 하프밴드 캐스케이드화.
 - **D3.** 볼트-네이티브 레거시 폴백(`voltageNativeInterface=false`) 제거 대기 — docs/34 W8-④의 1사이클 유예.
 - **D4.** CI 주석의 Linux/Windows 부동소수 이슈(NaN 처리·험 스펙트럼 빈) 미해결 — 크로스 플랫폼 게이트 부재.

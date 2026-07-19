@@ -19,6 +19,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <type_traits>
 #include <vector>
 
 using namespace valvra::dsp;
@@ -1648,6 +1649,18 @@ TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
     INFO("post-burst recovery divergence = " << relEarly);
     REQUIRE(relEarly > 1.0e-3);   // the pumping path is genuinely alive
     for (double v : pVn) REQUIRE(std::isfinite(v));
+}
+
+TEST_CASE("TubeAmpChain: audio-thread rebuild paths are allocation-free",
+          "[chain][rt][d1]")
+{
+    // docs/35 D1: rebuild/carry/reroll run on the audio thread and copy
+    // the chain by value.  With the variation cache converted to a fixed
+    // array the chain owns NO heap — proven statically: a trivially-
+    // copyable object cannot allocate on copy.  If someone adds a
+    // std::vector/string/function member back, this fails at compile
+    // time, not in a glitch report.
+    STATIC_REQUIRE(std::is_trivially_copyable_v<TubeAmpChain>);
 }
 
 TEST_CASE("TubeAmpChain: console realism feedback rides the real NFB loop",

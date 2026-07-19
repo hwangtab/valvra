@@ -638,7 +638,7 @@ public:
             // voltage is the physically correct source.  Clamped to 40%
             // of the bias magnitude so a wild draw shifts character, not
             // the documented operating class.
-            if (i >= 1 && idx < variationCache_.size())
+            if (i >= 1 && static_cast<int>(idx) < variationCount_)
             {
                 const double ratio =
                     variationCache_[idx].couplingLeak_ratio;
@@ -709,7 +709,7 @@ public:
         {
             const auto idx = static_cast<std::size_t>(i);
             double ccScale = 1.0;
-            if (idx < variationCache_.size())
+            if (static_cast<int>(idx) < variationCount_)
                 ccScale = variationCache_[idx].coupling_scale;
             interstages_[idx]
                 .prepare(config_.interstageCc * ccScale,
@@ -733,9 +733,9 @@ public:
         // from the single mains source so an EU (50 Hz → 100 Hz ripple) or
         // US (60 Hz → 120 Hz) region stays coherent with the heater hum.
         psu.ripple_freq = 2.0 * config_.mainsFrequencyHz;
-        if (! variationCache_.empty())
+        if (variationCount_ > 0)
         {
-            const auto& v0 = variationCache_.front();
+            const auto& v0 = variationCache_[0];
             psu.Vb_nominal *= v0.Vb_scale;
             psu.Z_internal *= v0.Zsupply_scale;
             psu.ripple_amp *= v0.ripple_scale;
@@ -1680,15 +1680,15 @@ private:
     // while the overall chain remains reproducible from a single user seed.
     void applyVariation()
     {
-        variationCache_.clear();
-        variationCache_.reserve(static_cast<std::size_t>(config_.numStages));
-        for (int i = 0; i < config_.numStages; ++i)
+        variationCount_ = std::clamp(config_.numStages, 0,
+                                     TubeAmpChainConfig::kMaxStages);
+        for (int i = 0; i < variationCount_; ++i)
         {
             const std::uint64_t stageSeed =
                 config_.variationSeed
                 ^ (0x9E3779B97F4A7C15ULL * static_cast<std::uint64_t>(i + 1));
-            variationCache_.push_back(
-                makeVariation(stageSeed, config_.variationDistribution));
+            variationCache_[static_cast<std::size_t>(i)] =
+                makeVariation(stageSeed, config_.variationDistribution);
         }
     }
 
@@ -1707,7 +1707,7 @@ private:
         // resistor as part of its AC plate load (docs/34 §3.8).
         cfg.nextStageLoadR = (i < config_.numStages - 1)
             ? config_.interstageRg : 0.0;
-        if (static_cast<std::size_t>(i) < variationCache_.size())
+        if (i < variationCount_)
         {
             const auto& v = variationCache_[static_cast<std::size_t>(i)];
             // Apply tube + passive perturbations.
@@ -1733,7 +1733,7 @@ private:
             // source / input transformer, so it keeps its own input-coupling
             // value and independent draw.
             if (i >= 1
-                && static_cast<std::size_t>(i - 1) < variationCache_.size())
+                && i - 1 < variationCount_)
                 cfg.gridCouplingC = config_.interstageCc
                     * variationCache_[static_cast<std::size_t>(i - 1)]
                           .coupling_scale;
@@ -1796,7 +1796,12 @@ private:
     int    rerollCrossfadePos_        { 0 };
     int    rerollCrossfadeSamples_    { 1 };
 
-    std::vector<ComponentVariation> variationCache_ {};
+    // Fixed-size cache — the rebuild/carry/reroll paths run on the audio
+    // thread, and a std::vector here was the last allocation they made
+    // (docs/35 D1).  kMaxStages entries live in the object itself.
+    std::array<ComponentVariation, TubeAmpChainConfig::kMaxStages>
+        variationCache_ {};
+    int variationCount_ { 0 };
 
     // External PSU (shared-rail stereo coupling) state.  When on, the
     // chain ignores its own psu_ and takes Vb from the injected value.
