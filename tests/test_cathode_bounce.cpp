@@ -8,7 +8,7 @@
 using Catch::Approx;
 using namespace valvra::dsp;
 
-TEST_CASE("Cathode bounce tracks steady current to Ip·Rk", "[bounce][static]")
+TEST_CASE("Cathode bounce tracks steady current to Ip*Rk", "[bounce][static]")
 {
     CathodeBounceParams p { .Rk = 1500.0, .Ck = 25.0e-6, .sampleRate = 48000.0 };
     CathodeBounce cb { p };
@@ -21,7 +21,7 @@ TEST_CASE("Cathode bounce tracks steady current to Ip·Rk", "[bounce][static]")
     REQUIRE(cb.currentBias() == Approx(1.5).epsilon(0.01));
 }
 
-TEST_CASE("Cathode bounce time constant matches τ = Rk·Ck", "[bounce][time-constant]")
+TEST_CASE("Cathode bounce time constant matches tau = Rk*Ck", "[bounce][time-constant]")
 {
     // This test verifies the PURE single-pole RC response, so the soakage
     // network is disabled — soakage is a deliberate second mechanism tested

@@ -72,7 +72,7 @@ TEST_CASE("PSU envelope recovers when load is removed", "[psu][dynamic]")
     REQUIRE(vb_unloaded == Approx(350.0).epsilon(0.01));
 }
 
-TEST_CASE("PSU DC level is always ≤ Vb_nominal", "[psu][invariant]")
+TEST_CASE("PSU DC level is always <= Vb_nominal", "[psu][invariant]")
 {
     // This invariant applies to the sag component only — real rail also
     // carries a 120 Hz ripple that can push momentary Vb above nominal,
@@ -145,7 +145,7 @@ TEST_CASE("PSU rail carries load-dependent 120 Hz ripple (reservoir physics)",
     REQUIRE(heavy.avg < light.avg);
 }
 
-TEST_CASE("PSU smoothing choke reduces output ripple (docs/34 §3.4)",
+TEST_CASE("PSU smoothing choke reduces output ripple (docs/34 S3.4)",
           "[psu][choke]")
 {
     // A choke + second cap (π filter) is a second LC smoothing stage, so

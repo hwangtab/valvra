@@ -42,7 +42,7 @@ TEST_CASE("12AX7 RSD_1 plate current is monotonic in Vp at Vg=-1.5V", "[koren][s
     }
 }
 
-TEST_CASE("12AX7 cutoff: Ip ≈ 0 at Vg = -10V", "[koren][static]")
+TEST_CASE("12AX7 cutoff: Ip ~ 0 at Vg = -10V", "[koren][static]")
 {
     KorenTriode t { params::kRSD_1 };
     const double ip = t.plateCurrent(250.0, -10.0);
@@ -74,7 +74,7 @@ TEST_CASE("12AX7 rp at operating point is in datasheet range", "[koren][static]"
     REQUIRE(rp < 120000.0);  // < 120 kΩ
 }
 
-TEST_CASE("12AX7 μ ≈ gm × rp at operating point", "[koren][static]")
+TEST_CASE("12AX7 mu ~ gm x rp at operating point", "[koren][static]")
 {
     // μ = gm · rp should be ≈ 100 (datasheet) for the measured Dempwolf sample.
     KorenTriode t { params::kRSD_1 };
@@ -113,7 +113,7 @@ TEST_CASE("EHX_1 has lower gain than RSD_1 (measured spread)", "[koren][variatio
     REQUIRE(ip_rsd > ip_ehx);
 }
 
-TEST_CASE("12AU7 Koren fallback has lower μ than 12AX7", "[koren][ecc82]")
+TEST_CASE("12AU7 Koren fallback has lower mu than 12AX7", "[koren][ecc82]")
 {
     KorenTriode ecc83 { params::kRSD_1 };
     KorenTriode ecc82 { params::kECC82_Koren };
@@ -153,7 +153,7 @@ TEST_CASE("12AU7 Koren fallback has lower μ than 12AX7", "[koren][ecc82]")
 // place such that small Koren-fit refinements break tests.
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("6SN7 plate curves are monotonic and μ ≈ 20",
+TEST_CASE("6SN7 plate curves are monotonic and mu ~ 20",
           "[koren][6sn7]")
 {
     KorenTriode t { params::k6SN7 };
@@ -191,7 +191,7 @@ TEST_CASE("6SN7 plate curves are monotonic and μ ≈ 20",
     REQUIRE(ip_idle < 0.040);
 }
 
-TEST_CASE("300B is a low-μ DHT power tube (μ ≈ 3.85)",
+TEST_CASE("300B is a low-mu DHT power tube (mu ~ 3.85)",
           "[koren][300b]")
 {
     KorenTriode t { params::k300B };

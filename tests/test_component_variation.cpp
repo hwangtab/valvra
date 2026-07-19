@@ -37,7 +37,7 @@ TEST_CASE("Different seeds produce different variations", "[variation][diversity
     REQUIRE(any_diff);
 }
 
-TEST_CASE("Population μ spread approximates target σ", "[variation][statistics]")
+TEST_CASE("Population mu spread approximates target sigma", "[variation][statistics]")
 {
     // Dempwolf academic spread: μ 17% over 3 tubes → σ ≈ 8%
     // Sample 1000 instances and confirm empirical σ is in [5%, 12%]

@@ -42,13 +42,13 @@ TEST_CASE("Langevin is odd symmetric", "[ja][numerical]")
     REQUIRE(langevin(0.0) == Approx(0.0));
 }
 
-TEST_CASE("Langevin approaches ±1 as |x| → ∞", "[ja][numerical]")
+TEST_CASE("Langevin approaches +/-1 as |x| -> inf", "[ja][numerical]")
 {
     REQUIRE(langevin(50.0) == Approx(1.0).epsilon(0.02));
     REQUIRE(langevin(-50.0) == Approx(-1.0).epsilon(0.02));
 }
 
-TEST_CASE("JA saturates near ±Ms for large fields", "[ja][major-loop]")
+TEST_CASE("JA saturates near +/-Ms for large fields", "[ja][major-loop]")
 {
     JilesAtherton ja { ja_params::kNiPermalloy_Peerless };
 
@@ -62,7 +62,7 @@ TEST_CASE("JA saturates near ±Ms for large fields", "[ja][major-loop]")
     REQUIRE(M_pos < ja_params::kNiPermalloy_Peerless.Ms * 1.01);
 }
 
-TEST_CASE("JA shows hysteresis: ascending ≠ descending", "[ja][hysteresis]")
+TEST_CASE("JA shows hysteresis: ascending != descending", "[ja][hysteresis]")
 {
     JilesAtherton ja { ja_params::kNiPermalloy_Peerless };
 
@@ -100,7 +100,7 @@ TEST_CASE("JA reset returns to initial state", "[ja][reset]")
     REQUIRE(std::abs(M_after_reset) < 1e-3);
 }
 
-TEST_CASE("JA DC input (dH=0) preserves δ sign", "[ja][numerical]")
+TEST_CASE("JA DC input (dH=0) preserves delta sign", "[ja][numerical]")
 {
     JilesAtherton ja { ja_params::kNiPermalloy_Peerless };
 

@@ -114,7 +114,10 @@ TEST_CASE("Golden render fingerprints match the checked-in reference",
     // glibc) — cross-platform bit-parity is explicitly NOT a goal of
     // this gate (docs/35 D4).  The platform suites still gate all
     // behavioural tests; only the fingerprint comparison is macOS-only.
-    SKIP("golden fingerprints gate the macOS reference platform only");
+    // (WARN+return rather than SKIP(): Catch2's skip exit code reads as
+    // a failure through ctest without extra test-property plumbing.)
+    WARN("golden fingerprints gate the macOS reference platform only");
+    return;
 #endif
     static const char* names[5] =
         { "v72", "console", "cv", "rndi", "hifi" };

@@ -68,7 +68,7 @@ TEST_CASE("TubeStage: resting DC with zero input", "[TubeStage][dc]")
     REQUIRE(std::abs(y) < 0.01);
 }
 
-TEST_CASE("TubeStage: V72 preset — small signal produces measurable output",
+TEST_CASE("TubeStage: V72 preset -- small signal produces measurable output",
           "[TubeStage][smallsignal]")
 {
     TubeStage stage;
@@ -143,7 +143,7 @@ TEST_CASE("TubeStage: warmup produces gain ramp over time", "[TubeStage][warmup]
     REQUIRE(stage.warmupProgress() == Approx(1.0).margin(0.02));
 }
 
-TEST_CASE("TubeStage: cathode bounce — sustained large signal shifts output",
+TEST_CASE("TubeStage: cathode bounce -- sustained large signal shifts output",
           "[TubeStage][bounce]")
 {
     TubeStage stage;
