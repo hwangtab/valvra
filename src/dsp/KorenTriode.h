@@ -315,8 +315,9 @@ public:
         IgDeriv r { p_.Ig0, 0.0 };
         if (sg > 0.0)
         {
-            r.Ig  += p_.Gg * std::pow(sg, p_.xi);
-            r.dIg  = p_.xi * p_.Gg * std::pow(sg, p_.xi - 1.0) * sig_g;
+            const double sgPowXi = std::pow(sg, p_.xi);
+            r.Ig  += p_.Gg * sgPowXi;
+            r.dIg  = p_.xi * p_.Gg * (sgPowXi / sg) * sig_g;
         }
         return r;
     }
@@ -435,10 +436,14 @@ public:
         double dIk_dVg  = 0.0;
         if (s > 0.0)
         {
-            Ik = p_.G * std::pow(s, p_.gamma);
+            // One pow instead of two: s^(γ−1) = s^γ / s exactly (s > 0
+            // in this branch) — the second std::pow was ~15% of the
+            // whole evaluate() on the profile (docs/35 D2).
+            const double sPowG = std::pow(s, p_.gamma);
+            Ik = p_.G * sPowG;
             // pow_term = G·γ·s^(γ−1).  Multiplied by sig gives the
             // chain-rule completion — ds/dVeff at Vg-derivative.
-            const double pow_term = p_.gamma * p_.G * std::pow(s, p_.gamma - 1.0);
+            const double pow_term = p_.gamma * p_.G * (sPowG / s);
             dIk_dVg = pow_term * sig;
         }
 
@@ -467,8 +472,9 @@ public:
         double dIg_dVg = 0.0;
         if (sg > 0.0)
         {
-            Ig += p_.Gg * std::pow(sg, p_.xi);
-            const double pow_g = p_.xi * p_.Gg * std::pow(sg, p_.xi - 1.0);
+            const double sgPowXi = std::pow(sg, p_.xi);
+            Ig += p_.Gg * sgPowXi;
+            const double pow_g = p_.xi * p_.Gg * (sgPowXi / sg);
             dIg_dVg = pow_g * sig_g;
         }
 

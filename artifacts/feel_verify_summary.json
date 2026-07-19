@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-19 20:52:21 ",
+  "generated_at": "2026-07-19 22:01:57 ",
   "passed": true,
   "rows": [
     {
@@ -7,7 +7,7 @@
       "preset": "v72",
       "low_level_harmonic_slope": 0.8499097544663587,
       "texture_recovery": 0.33888449095002643,
-      "micro_motion": 0.13239423204459863,
+      "micro_motion": 0.13239423203212655,
       "passed": true
     },
     {
@@ -15,39 +15,39 @@
       "preset": "v72",
       "low_level_harmonic_slope": 0.849729925639749,
       "texture_recovery": 0.35686313411789666,
-      "micro_motion": 0.13029884554748922,
+      "micro_motion": 0.13029884554637303,
       "passed": true
     },
     {
       "scenario": "Master Tone Subtle",
       "preset": "v72",
       "low_level_harmonic_slope": 0.844491003902255,
-      "texture_recovery": 0.3286586462880585,
-      "micro_motion": 0.13026569320823142,
+      "texture_recovery": 0.32865864628804126,
+      "micro_motion": 0.13026569318784956,
       "passed": true
     },
     {
       "scenario": "Master Print HiFi",
       "preset": "hifi",
-      "low_level_harmonic_slope": 0.8922972200521311,
-      "texture_recovery": 0.3268663094625581,
-      "micro_motion": 0.06560113694967197,
+      "low_level_harmonic_slope": 0.8968180248404143,
+      "texture_recovery": 0.3297410728572653,
+      "micro_motion": 0.0656011370457226,
       "passed": true
     },
     {
       "scenario": "Drum Bus Punch",
       "preset": "marshall",
-      "low_level_harmonic_slope": 0.8180367711229176,
+      "low_level_harmonic_slope": 0.8180375688853089,
       "texture_recovery": 0.38349522200947195,
-      "micro_motion": 0.1665742408346558,
+      "micro_motion": 0.1665742408346794,
       "passed": true
     },
     {
       "scenario": "Vocal Color (Creative)",
       "preset": "cv",
-      "low_level_harmonic_slope": 0.8170361053424754,
-      "texture_recovery": 0.36837506962762273,
-      "micro_motion": 0.17714686608818883,
+      "low_level_harmonic_slope": 0.817036105290886,
+      "texture_recovery": 0.3683749308882845,
+      "micro_motion": 0.17701146891403935,
       "passed": true
     },
     {
@@ -55,31 +55,31 @@
       "preset": "rndi",
       "low_level_harmonic_slope": 0.8496480957079592,
       "texture_recovery": 0.34012904172502845,
-      "micro_motion": 0.08575226350308557,
+      "micro_motion": 0.08575226350778443,
       "passed": true
     },
     {
       "scenario": "Vocal Consonant Recovery",
       "preset": "cv",
-      "low_level_harmonic_slope": 0.970304042152557,
-      "texture_recovery": 0.30254017649690024,
-      "micro_motion": 0.19097990700216227,
+      "low_level_harmonic_slope": 0.970304041720836,
+      "texture_recovery": 0.3025401765526794,
+      "micro_motion": 0.1909799075600539,
       "passed": true
     },
     {
       "scenario": "Bass Pluck Memory",
       "preset": "rndi",
-      "low_level_harmonic_slope": 0.632430281593952,
+      "low_level_harmonic_slope": 0.6324302815939845,
       "texture_recovery": 0.901178640474352,
-      "micro_motion": 0.08724443426775484,
+      "micro_motion": 0.08724443427780908,
       "passed": true
     },
     {
       "scenario": "Drum Transient Iron",
       "preset": "marshall",
-      "low_level_harmonic_slope": 0.7909649941386065,
-      "texture_recovery": 0.9049742514990711,
-      "micro_motion": 0.1666322830551251,
+      "low_level_harmonic_slope": 0.7322425440293359,
+      "texture_recovery": 0.9252148590480737,
+      "micro_motion": 0.16663228400860822,
       "passed": true
     }
   ]

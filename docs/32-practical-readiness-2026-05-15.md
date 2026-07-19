@@ -1,6 +1,6 @@
 # Practical Mix/Master Readiness Report
 
-- Generated: 2026-07-19 20:52:21 
+- Generated: 2026-07-19 22:01:57 
 - Command: `python3 scripts/practical_readiness_report.py`
 - Engine: `valvra_process` @ 48 kHz
 
@@ -58,7 +58,7 @@
 | Mix Bus Glue | `v72` | 0.90 | `off` | 0.00 | 1.00 | -4.2 | +5.2 | 9.4 dB | -6.0 dB | -6.2 dB | OK |
 | Mix Bus Glue+ | `v72` | 1.15 | `opto` | 0.28 | 0.55 | -3.9 | +9.1 | 13.0 dB | -6.6 dB | -10.1 dB | OK |
 | Master Tone Subtle | `v72` | 0.95 | `tape` | 0.22 | 0.40 | -8.3 | +10.1 | 18.4 dB | -20.5 dB | -11.1 dB | OK |
-| Master Print HiFi | `hifi` | 2.80 | `tape` | 0.18 | 0.35 | -7.2 | +9.3 | 16.4 dB | +3.1 dB | -10.3 dB | OK |
+| Master Print HiFi | `hifi` | 2.80 | `tape` | 0.18 | 0.35 | -7.2 | +9.3 | 16.5 dB | +3.3 dB | -10.3 dB | OK |
 | Drum Bus Punch | `marshall` | 2.60 | `fet` | 0.42 | 0.62 | +12.8 | +22.2 | 9.4 dB | -11.1 dB | -23.2 dB | OK |
 | Vocal Color (Creative) | `cv` | 3.00 | `tape` | 0.22 | 0.40 | -12.0 | -2.8 | 9.2 dB | -10.4 dB | +1.8 dB | OK |
 | Bass DI Color | `rndi` | 2.60 | `off` | 0.00 | 1.00 | +2.4 | +11.6 | 9.2 dB | -15.6 dB | -12.6 dB | OK |
@@ -76,14 +76,14 @@
 | Master Tone Subtle | `v72` | 0% | -8.3 | +10.1 | 18.4 dB | -20.5 dB | -55.0 |
 | Master Tone Subtle | `v72` | 35% | -8.6 | +10.3 | 18.8 dB | -20.5 dB | -55.6 |
 | Master Tone Subtle | `v72` | 100% | -9.1 | +10.3 | 19.4 dB | -20.9 dB | -56.8 |
-| Master Print HiFi | `hifi` | 0% | -7.2 | +9.3 | 16.4 dB | +3.1 dB | -104.0 |
-| Master Print HiFi | `hifi` | 35% | -7.2 | +9.1 | 16.3 dB | +2.4 dB | -104.7 |
-| Master Print HiFi | `hifi` | 100% | -7.0 | +9.3 | 16.3 dB | +1.0 dB | -104.6 |
+| Master Print HiFi | `hifi` | 0% | -7.2 | +9.3 | 16.5 dB | +3.3 dB | -104.0 |
+| Master Print HiFi | `hifi` | 35% | -7.2 | +9.0 | 16.2 dB | +2.5 dB | -104.7 |
+| Master Print HiFi | `hifi` | 100% | -6.9 | +9.3 | 16.3 dB | +1.4 dB | -104.6 |
 | Drum Bus Punch | `marshall` | 0% | +12.8 | +22.2 | 9.4 dB | -11.1 dB | -27.6 |
 | Drum Bus Punch | `marshall` | 35% | +15.1 | +24.7 | 9.6 dB | -12.5 dB | -26.5 |
 | Drum Bus Punch | `marshall` | 100% | +17.9 | +28.3 | 10.3 dB | -15.7 dB | -25.2 |
 | Vocal Color (Creative) | `cv` | 0% | -12.0 | -2.8 | 9.2 dB | -10.4 dB | -64.2 |
-| Vocal Color (Creative) | `cv` | 35% | -12.1 | -3.1 | 9.0 dB | -10.6 dB | -65.2 |
+| Vocal Color (Creative) | `cv` | 35% | -12.1 | -3.1 | 9.0 dB | -10.6 dB | -65.1 |
 | Vocal Color (Creative) | `cv` | 100% | -12.2 | -3.2 | 9.0 dB | -10.4 dB | -66.5 |
 | Bass DI Color | `rndi` | 0% | +2.4 | +11.6 | 9.2 dB | -15.6 dB | -95.2 |
 | Bass DI Color | `rndi` | 35% | +2.4 | +11.5 | 9.1 dB | -15.7 dB | -95.7 |
@@ -98,20 +98,20 @@
 | Mix Bus Glue | `v72` | 0.85 | 0.34 | 0.13 | PASS |
 | Mix Bus Glue+ | `v72` | 0.85 | 0.36 | 0.13 | PASS |
 | Master Tone Subtle | `v72` | 0.84 | 0.33 | 0.13 | PASS |
-| Master Print HiFi | `hifi` | 0.89 | 0.33 | 0.07 | PASS |
+| Master Print HiFi | `hifi` | 0.90 | 0.33 | 0.07 | PASS |
 | Drum Bus Punch | `marshall` | 0.82 | 0.38 | 0.17 | PASS |
 | Vocal Color (Creative) | `cv` | 0.82 | 0.37 | 0.18 | PASS |
 | Bass DI Color | `rndi` | 0.85 | 0.34 | 0.09 | PASS |
 | Vocal Consonant Recovery | `cv` | 0.97 | 0.30 | 0.19 | PASS |
 | Bass Pluck Memory | `rndi` | 0.63 | 0.90 | 0.09 | PASS |
-| Drum Transient Iron | `marshall` | 0.79 | 0.90 | 0.17 | PASS |
+| Drum Transient Iron | `marshall` | 0.73 | 0.93 | 0.17 | PASS |
 
 | Scenario | Preset | Legacy RMS | Fitted RMS | Legacy TP | Fitted TP | Legacy H2-H3 | Fitted H2-H3 | Fitted-Legacy Residual |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | Mix Bus Glue | `v72` | -4.5 | -4.5 | +4.9 | +4.9 | +28.5 dB | +28.4 dB | -63.4 dBFS |
 | Mix Bus Glue+ | `v72` | -4.3 | -4.3 | +8.8 | +8.8 | +27.7 dB | +27.7 dB | -58.4 dBFS |
 | Master Tone Subtle | `v72` | -8.6 | -8.6 | +10.3 | +10.3 | -8.1 dB | -8.2 dB | -64.6 dBFS |
-| Master Print HiFi | `hifi` | -7.2 | -7.2 | +9.0 | +9.1 | +20.1 dB | +19.5 dB | -16.3 dBFS |
+| Master Print HiFi | `hifi` | -7.2 | -7.2 | +9.1 | +9.0 | +18.7 dB | +20.9 dB | -16.4 dBFS |
 | Drum Bus Punch | `marshall` | +15.0 | +15.1 | +24.6 | +24.7 | -5.9 dB | -5.9 dB | -23.9 dBFS |
 | Vocal Color (Creative) | `cv` | -12.1 | -12.1 | -3.1 | -3.1 | +0.8 dB | +0.9 dB | -62.4 dBFS |
 | Bass DI Color | `rndi` | +2.4 | +2.4 | +11.5 | +11.5 | +37.7 dB | +37.7 dB | -59.0 dBFS |

@@ -121,8 +121,12 @@ public:
         const double muG2 = std::max(p_.muG2, 1.0e-6);
         const double Vctrl = Vg1 + (Vg2 / muG2);
         const double s = softplus(p_.C * Vctrl) / p_.C;
+        // One shared log for the two same-base powers (γ here, γ2 in the
+        // screen-fraction below): pow = exp(y·log x), so this trades two
+        // pow calls for one log + two exp (docs/35 D2).
+        const double logS = (s > 0.0) ? std::log(s) : 0.0;
         if (s > 0.0)
-            c.Ispace = p_.G * std::pow(s, p_.gamma);
+            c.Ispace = p_.G * std::exp(p_.gamma * logS);
 
         // Positive g1 conduction — computed BEFORE the plate/screen
         // partition so it can be subtracted from the emitted space current.
@@ -180,7 +184,7 @@ public:
         double baseFrac = 0.0;
         if (s > 0.0 && c.Ispace > 1.0e-15)
             baseFrac = std::clamp(
-                (p_.G2 * std::pow(s, p_.gamma2)) / c.Ispace, 0.0, 0.45);
+                (p_.G2 * std::exp(p_.gamma2 * logS)) / c.Ispace, 0.0, 0.45);
         // Partition the AVAILABLE space current (after Ig1) between plate
         // and screen so Ik = Ip + Ig2 + Ig1 holds exactly.
         const double IpPre = IspaceAvail * c.plateShare * (1.0 - baseFrac);
