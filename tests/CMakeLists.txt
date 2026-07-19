@@ -129,7 +129,7 @@ if(VALVRA_BUILD_PLUGIN)
             test_plugin_processor_mono.cpp
             ${CMAKE_SOURCE_DIR}/src/plugin/PluginProcessor.cpp
             ${CMAKE_SOURCE_DIR}/src/plugin/PluginEditor.cpp
-            PROPERTIES COMPILE_OPTIONS /W4
+            PROPERTIES COMPILE_OPTIONS "/W4;/utf-8"
         )
     else()
         set_source_files_properties(

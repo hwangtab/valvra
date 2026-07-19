@@ -107,6 +107,15 @@ Fingerprint renderFingerprint(int presetIdx, double amp)
 TEST_CASE("Golden render fingerprints match the checked-in reference",
           "[golden]")
 {
+#if ! defined(__APPLE__)
+    // The reference is generated on the macOS release platform.  Other
+    // libms diverge in the last ulps and the chaotic hysteresis paths
+    // amplify that to whole-dB fingerprint shifts (5 dB observed on
+    // glibc) — cross-platform bit-parity is explicitly NOT a goal of
+    // this gate (docs/35 D4).  The platform suites still gate all
+    // behavioural tests; only the fingerprint comparison is macOS-only.
+    SKIP("golden fingerprints gate the macOS reference platform only");
+#endif
     static const char* names[5] =
         { "v72", "console", "cv", "rndi", "hifi" };
     for (int p = 0; p < 5; ++p)
