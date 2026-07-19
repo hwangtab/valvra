@@ -1580,75 +1580,58 @@ TEST_CASE("TubeAmpChain: interstage transformer coupling is a working "
     REQUIRE(std::sqrt(diffSq / std::max(refSq, 1e-30)) > 0.01);
 }
 
-TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
-          "in steady state, alive on operating-point motion",
+TEST_CASE("TubeAmpChain: voltage-native hand-off stays calibrated and pumps on operating-point motion",
           "[chain][voltnative]")
 {
-    // docs/34 §4.1 — the volt-native hand-off synthesises its pads from
-    // the legacy calibration product, so the STEADY-STATE response must
-    // match the normalized path within the migration gates (±0.1 dB H1,
-    // ±1 dB harmonics).  What it deliberately CHANGES: interior stages'
-    // slow operating-point wobble (sag/thermal, 0.5–7 Hz) now pumps the
-    // next grid through the coupling cap — so the recovery trajectory
-    // after a loud burst must differ measurably from the legacy path.
-    auto build = [&](bool vn, TubeAmpChain& chain) {
+    // docs/34 §4.1 / docs/35 D3 — the legacy normalized interface is
+    // GONE; volt-native is the only path.  What this guards now:
+    // (a) the synthesized pads keep the level calibration (absolute H1
+    //     anchor recorded at removal time, generous band), and
+    // (b) the defining volt-native behaviour — slow operating-point
+    //     wobble pumping the next grid — leaves a finite, live recovery
+    //     trail after a hot burst.
+    auto build = [&](TubeAmpChain& chain) {
         auto cfg = chain_presets::V72Preamp();
-        cfg.voltageNativeInterface = vn;
         cfg.variationSeed = 4;
         chain.setup(cfg, kSampleRate);
     };
 
-    // (a) Steady-state equivalence gates.
-    auto harmonics = [&](bool vn) {
-        TubeAmpChain chain;
-        build(vn, chain);
-        std::vector<double> out;
-        renderSine(chain, 997.0, 0.15, 1.0, out);
-        std::vector<double> tail(out.end() - static_cast<long>(out.size() / 4),
-                                 out.end());
-        struct H { double h1, h2, h3; };
-        return H { goertzelMag(tail, 997.0, kSampleRate),
-                   goertzelMag(tail, 2.0 * 997.0, kSampleRate),
-                   goertzelMag(tail, 3.0 * 997.0, kSampleRate) };
-    };
-    const auto vn  = harmonics(true);
-    const auto leg = harmonics(false);
-    const double h1Db = 20.0 * std::log10(vn.h1 / std::max(leg.h1, 1e-15));
-    const double h2Db = 20.0 * std::log10(std::max(vn.h2, 1e-15)
-                                          / std::max(leg.h2, 1e-15));
-    const double h3Db = 20.0 * std::log10(std::max(vn.h3, 1e-15)
-                                          / std::max(leg.h3, 1e-15));
-    INFO("H1 shift = " << h1Db << " dB, H2 = " << h2Db
-         << " dB, H3 = " << h3Db << " dB");
-    REQUIRE(std::abs(h1Db) < 0.1);
-    REQUIRE(std::abs(h2Db) < 1.0);
-    REQUIRE(std::abs(h3Db) < 1.0);
+    TubeAmpChain chain;
+    build(chain);
+    std::vector<double> out;
+    renderSine(chain, 997.0, 0.15, 1.0, out);
+    std::vector<double> tail(out.end() - static_cast<long>(out.size() / 4),
+                             out.end());
+    const double h1 = goertzelMag(tail, 997.0, kSampleRate);
+    INFO("steady-state H1 = " << h1);
+    // Level anchor: the pad synthesis preserves the legacy calibration —
+    // measured 0.968 at removal; ±1.5 dB catches a broken pad chain
+    // without freezing voicing evolution (golden owns the tight gate).
+    REQUIRE(h1 > 0.968 * 0.84);
+    REQUIRE(h1 < 0.968 * 1.19);
 
-    // (b) Bias-pumping physics: loud 2 s burst, then a quiet probe — the
-    //     two modes' recovery trajectories must diverge beyond rounding
-    //     while their late steady state re-converges.
-    auto recovery = [&](bool vnFlag) {
-        TubeAmpChain chain;
-        build(vnFlag, chain);
-        std::vector<double> tmp;
-        renderSine(chain, 110.0, 0.8, 2.0, tmp);       // hot LF burst
-        std::vector<double> probe;
-        renderSine(chain, 997.0, 0.02, 0.5, probe);    // quiet probe
-        return probe;
-    };
-    const auto pVn  = recovery(true);
-    const auto pLeg = recovery(false);
-    double dEarly = 0.0, rEarly = 0.0;
+    TubeAmpChain burst;
+    build(burst);
+    std::vector<double> tmp;
+    renderSine(burst, 110.0, 0.8, 2.0, tmp);       // hot LF burst
+    std::vector<double> probe;
+    renderSine(burst, 997.0, 0.02, 0.5, probe);    // quiet probe
+    double drift = 0.0;
     const std::size_t early = static_cast<std::size_t>(0.25 * kSampleRate);
-    for (std::size_t i = 0; i < early; ++i)
-    {
-        dEarly += (pVn[i] - pLeg[i]) * (pVn[i] - pLeg[i]);
-        rEarly += pLeg[i] * pLeg[i];
-    }
-    const double relEarly = std::sqrt(dEarly / std::max(rEarly, 1e-30));
-    INFO("post-burst recovery divergence = " << relEarly);
-    REQUIRE(relEarly > 1.0e-3);   // the pumping path is genuinely alive
-    for (double v : pVn) REQUIRE(std::isfinite(v));
+    const std::size_t late0 = probe.size() - early;
+    double eEarly = 0.0, eLate = 0.0;
+    for (std::size_t i = 0; i < early; ++i) eEarly += probe[i] * probe[i];
+    for (std::size_t i = late0; i < probe.size(); ++i) eLate += probe[i] * probe[i];
+    drift = std::sqrt(eEarly / static_cast<double>(early))
+          / std::max(std::sqrt(eLate / static_cast<double>(early)), 1e-30);
+    INFO("early/late probe energy ratio = " << drift);
+    // The recovering operating point modulates the early probe: the
+    // ratio must sit away from exactly 1 (dead interface) but bounded
+    // (no runaway pumping).
+    REQUIRE(std::abs(drift - 1.0) > 1.0e-4);
+    REQUIRE(drift > 0.25);
+    REQUIRE(drift < 4.0);
+    for (double v : probe) REQUIRE(std::isfinite(v));
 }
 
 TEST_CASE("TubeAmpChain: audio-thread rebuild paths are allocation-free",

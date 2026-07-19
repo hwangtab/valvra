@@ -253,7 +253,7 @@ struct TubeAmpChainConfig
     // cap, as the physical circuit does.  Interstage-transformer
     // boundaries keep the legacy normalized hand-off (the iron's drive
     // calibration is normalized-domain).
-    bool voltageNativeInterface { true };
+
 
     // ─── Interstage transformer (docs/14, docs/34 v2) ───────────────────
     // Replaces the RC coupling at ONE stage boundary with a full JA
@@ -654,10 +654,12 @@ public:
             // Voltage-native boundary flags (docs/34 §4.1): the trafo
             // boundary (if any) stays legacy-normalized.
             const int trafoAt = config_.interstageTrafoAfterStage;
-            sCfg.voltageNativeOutput = config_.voltageNativeInterface
-                && i < config_.numStages - 1 && i != trafoAt;
-            sCfg.voltageNativeInput = config_.voltageNativeInterface
-                && i > 0 && (i - 1) != trafoAt;
+            // Volt-native is the ONLY inter-stage interface since docs/34
+            // W8-④'s one-cycle legacy grace expired (docs/35 D3); the
+            // trafo boundary stays normalized as before.
+            sCfg.voltageNativeOutput = i < config_.numStages - 1
+                && i != trafoAt;
+            sCfg.voltageNativeInput = i > 0 && (i - 1) != trafoAt;
             stageSwingCache_[idx] = sCfg.inputVoltageSwing;
             stageOutGainCache_[idx] = sCfg.outputGainLinear;
 
@@ -1406,8 +1408,7 @@ public:
                             blockingDrive);
                         // Voltage-native boundary: volts → HPF → explicit
                         // pad → next grid volts (docs/34 §4.1).
-                        if (cfg.voltageNativeInterface)
-                            stageOutput *= pads[idx];
+                        stageOutput *= pads[idx];
                     }
                 }
             }
