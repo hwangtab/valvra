@@ -136,7 +136,7 @@ if(VALVRA_BUILD_PLUGIN)
             test_plugin_processor_mono.cpp
             ${CMAKE_SOURCE_DIR}/src/plugin/PluginProcessor.cpp
             ${CMAKE_SOURCE_DIR}/src/plugin/PluginEditor.cpp
-            PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"
+            PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic;-Werror=reorder-init-list"
         )
     endif()
     # CTest labels for CI sharding:

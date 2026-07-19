@@ -2779,9 +2779,9 @@ inline TubeStageConfig hifi300BPower()
         .topology = TubeTopology::CommonCathode,
         .Vg_bias = -76.0, .Vp_nominal = 350.0,
         .Rp = 1.5e3, .Rk = 1.2e3, .Ck = 470.0e-6,
+        .enableCathodeBounce = true,
         .inputVoltageSwing = 12.0,   // moderate grid drive
         .outputGainLinear = 3.0,     // makeup so 300B's contribution shows
-        .enableCathodeBounce = true,
         .enableWarmup = true, .warmupTauSeconds = 60.0,  // DHT warms slow
         .enableMillerFilter = true,
         .Cgp_miller = 12.0e-12,                 // 300B has substantial Cgp
