@@ -713,6 +713,7 @@ ValvraProcessor::ValvraProcessor()
     params_.addParameterListener(kParamOutputTrafo, this);
     params_.addParameterListener(kParamMcDistribution, this);
     params_.addParameterListener(kParamCvMode, this);
+    params_.addParameterListener(kParamMains, this);
     // M/S mode swap requires both chains to be re-seeded (shared seed in
     // Mid/Side mode vs XOR-salted in Stereo mode).
     params_.addParameterListener(kParamMSMode, this);
@@ -744,6 +745,7 @@ ValvraProcessor::~ValvraProcessor()
     params_.removeParameterListener(kParamOutputTrafo, this);
     params_.removeParameterListener(kParamMcDistribution, this);
     params_.removeParameterListener(kParamCvMode, this);
+    params_.removeParameterListener(kParamMains, this);
     params_.removeParameterListener(kParamMSMode, this);
 
     for (const auto& s : kStageParams)
@@ -775,6 +777,7 @@ void ValvraProcessor::parameterChanged(const juce::String& paramID,
         || paramID == kParamOutputTrafo
         || paramID == kParamMcDistribution
         || paramID == kParamCvMode
+        || paramID == kParamMains
         || paramID == kParamMSMode
         || paramID == kParamTargetProfile
         || paramID == kParamRealismAmount)
@@ -895,6 +898,14 @@ ValvraProcessor::createLayout()
             "Culture Vulture Mode",
             StringArray { "T", "P1", "P2" },
             1),
+        // One switch drives every line-frequency mechanism coherently —
+        // heater hum, PSU ripple (2× line) and the processor's leakage
+        // hum all read the same chain field (docs/34 §1.5, docs/35 C1).
+        std::make_unique<AudioParameterChoice>(
+            ParameterID { kParamMains, 1 },
+            "Mains Frequency",
+            StringArray { "60 Hz (US/JP)", "50 Hz (EU)" },
+            0),
         std::make_unique<AudioParameterFloat>(
             ParameterID { kParamNeuralBlend, 1 },
             "Neural Blend",
@@ -1309,6 +1320,16 @@ void ValvraProcessor::rebuildChain()
         cfgR.variationSeed = seedR;
         cfgL.variationDistribution = distribution;
         cfgR.variationDistribution = distribution;
+    }
+
+    // Mains region — applied after the CV block above may have replaced
+    // the configs wholesale.
+    {
+        const bool eu = static_cast<int>(
+            *params_.getRawParameterValue(kParamMains)) == 1;
+        const double mainsHz = eu ? 50.0 : 60.0;
+        cfgL.mainsFrequencyHz = mainsHz;
+        cfgR.mainsFrequencyHz = mainsHz;
     }
 
     auto applyChainBuilderParams = [this](dsp::TubeAmpChainConfig& cfg)

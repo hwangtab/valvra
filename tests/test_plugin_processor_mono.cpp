@@ -1277,6 +1277,64 @@ TEST_CASE("ValvraProcessor: analyze match writes finite clamped trim",
     REQUIRE(choiceParamValue(proc, "levelMatchMode") == 2);
 }
 
+TEST_CASE("ValvraProcessor: mains parameter moves the hum line to 50 Hz",
+          "[plugin][mains][spectrum]")
+{
+    constexpr double kSR = 48000.0;
+    constexpr int kBS = 256;
+
+    auto humBinRatio = [&](int mainsChoice)
+    {
+        valvra::ValvraProcessor proc;
+        proc.recallSeed(0xABCDULL);
+        setChoiceParam(proc, "preset", 0);
+        setChoiceParam(proc, "oversample", 0);
+        setChoiceParam(proc, "mains", mainsChoice);
+        setFloatParam(proc, "drive", 1.0f);
+        setFloatParam(proc, "mix", 1.0f);
+        setBoolParam(proc, "bypass", false);
+        proc.setNullTestMode(false);
+
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses .add(juce::AudioChannelSet::stereo());
+        layout.outputBuses.add(juce::AudioChannelSet::stereo());
+        REQUIRE(proc.setBusesLayout(layout));
+        proc.prepareToPlay(kSR, kBS);
+
+        juce::MidiBuffer midi;
+        juce::AudioBuffer<float> buffer(2, kBS);
+        std::vector<double> y;
+        const int blocks = static_cast<int>(1.0 * kSR) / kBS;
+        const int skip = blocks / 4;
+        for (int b = 0; b < blocks; ++b)
+        {
+            buffer.clear();
+            proc.processBlock(buffer, midi);
+            if (b >= skip)
+                for (int n = 0; n < kBS; ++n)
+                    y.push_back(static_cast<double>(buffer.getSample(0, n)));
+        }
+        auto bin = [&](double freq) {
+            double re = 0.0, im = 0.0;
+            const double w = 2.0 * std::numbers::pi * freq / kSR;
+            for (std::size_t i = 0; i < y.size(); ++i)
+            {
+                re += y[i] * std::cos(w * static_cast<double>(i));
+                im += y[i] * std::sin(w * static_cast<double>(i));
+            }
+            return std::sqrt(re * re + im * im)
+                 / static_cast<double>(y.size());
+        };
+        return bin(50.0) / std::max(bin(60.0), 1.0e-15);
+    };
+
+    const double us = humBinRatio(0);   // 60 Hz: ratio << 1
+    const double eu = humBinRatio(1);   // 50 Hz: ratio >> 1
+    INFO("50/60 bin ratio: US = " << us << ", EU = " << eu);
+    REQUIRE(us < 0.5);
+    REQUIRE(eu > 2.0);
+}
+
 TEST_CASE("ValvraProcessor: analog realism is seed-deterministic and bounded",
           "[plugin][realism][determinism]")
 {

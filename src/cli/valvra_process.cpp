@@ -57,6 +57,7 @@ struct CliOptions
     double      drive           { 1.0 };
     std::uint64_t seed          { 0 };
     double      sampleRate      { 48000.0 };
+    double      mainsHz         { 60.0 };
     int         oversample      { 4 };
     double      warmupSec       { 0.1 };
     std::string expansion       { "off" };
@@ -95,6 +96,7 @@ void printHelp()
         "  --fit-da=X               Override realism interstage DA amount (fit harness)\n"
         "  --fit-da-tau=X           Override realism interstage DA tau [s] (fit harness)\n"
         "  --seed=N                Monte Carlo seed (default 0)\n"
+        "  --mains=60|50           Line frequency [Hz]: hum + PSU ripple (default 60)\n"
         "  --sr=48000              Sample rate (used only for stdin mode)\n"
         "  --os=4                  Oversampling factor (1, 2, 4, 8, 16)\n"
         "  --warmup-sec=0.1        Seconds of silence to prime before reading input\n");
@@ -410,6 +412,17 @@ bool parseArgs(int argc, char** argv, CliOptions& o, int& exitCode)
                 return false;
             }
         }
+        else if (key == "--mains")
+        {
+            if (! parseDoubleStrict(key, val, o.mainsHz, err)
+                || (o.mainsHz != 50.0 && o.mainsHz != 60.0))
+            {
+                std::fprintf(stderr,
+                             "error: --mains must be 50 or 60\n");
+                exitCode = 1;
+                return false;
+            }
+        }
         else if (key == "--seed")
         {
             if (! parseUInt64Strict(key, val, o.seed, err))
@@ -641,6 +654,7 @@ TubeAmpChainConfig buildConfig(const CliOptions& o)
     }
 
     cfg.variationSeed = o.seed;
+    cfg.mainsFrequencyHz = o.mainsHz;
     applyRealism(cfg, o);
     return cfg;
 }

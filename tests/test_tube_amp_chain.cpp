@@ -1131,6 +1131,46 @@ TEST_CASE("PowerSupplySag: ripple oscillator actually modulates B+ at "
 // input.  If the hum level were the same for all seeds, the variation
 // extension wasn't actually wired into the chain.
 // ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("TubeAmpChain: 50 Hz mains moves hum and ripple lines coherently",
+          "[chain][heater-hum][mains][spectrum]")
+{
+    // docs/35 C1: one config field drives heater hum, PSU ripple (2x
+    // line) and the leakage hum — an EU chain must put its energy at
+    // 50/100 Hz, not 60/120 Hz.
+    auto cfg = chain_presets::V72Preamp();
+    cfg.variationSeed = 0xABCD;
+    cfg.mainsFrequencyHz = 50.0;
+    for (int i = 0; i < cfg.numStages; ++i)
+        cfg.stages[i].enableShotNoise = false;
+    TubeAmpChain chain;
+    chain.setup(cfg, kSampleRate);
+
+    const int N    = static_cast<int>(0.5 * kSampleRate);
+    const int skip = static_cast<int>(0.1 * kSampleRate);
+    std::vector<double> y;
+    y.reserve(static_cast<std::size_t>(N - skip));
+    for (int n = 0; n < N; ++n)
+    {
+        const double s = chain.process(0.0);
+        if (n >= skip) y.push_back(s);
+    }
+    auto bin = [&](double freq) {
+        double re = 0.0, im = 0.0;
+        const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
+        for (std::size_t i = 0; i < y.size(); ++i)
+        {
+            re += y[i] * std::cos(w * static_cast<double>(i));
+            im += y[i] * std::sin(w * static_cast<double>(i));
+        }
+        return std::sqrt(re * re + im * im)
+             / static_cast<double>(y.size());
+    };
+    const double b50 = bin(50.0);
+    const double b60 = bin(60.0);
+    INFO("bin50 = " << b50 << ", bin60 = " << b60);
+    REQUIRE(b50 > 5.0 * b60);
+}
+
 TEST_CASE("TubeAmpChain: two seeds produce different heater-hum levels "
           "(Monte Carlo covers hidden-physics params)",
           "[chain][monte-carlo][hidden-physics]")
