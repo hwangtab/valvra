@@ -457,6 +457,40 @@ TEST_CASE("PushPullStage: magnetizing injection sign pins the plate response",
     REQUIRE(negShift < -0.3);
 }
 
+TEST_CASE("PushPullStage: magnetizing de-embed share tracks the operating point",
+          "[pushpull][magcoupling][alpha-track]")
+{
+    // docs/35 C3: the linear magnetizing de-embed used a rest-frozen
+    // current-divider share; it now follows the pair's per-sample solved
+    // plate slopes.  At rest the tracked share must sit on the rest
+    // value (bit-continuity of the calibration); deep class-AB drive
+    // starves one side per half-cycle (rpInv -> 0), so the share must
+    // dip well below rest — that dip is the iron demand passing through
+    // as physical compression instead of a stale linear subtraction.
+    PushPullStageConfig cfg;
+    cfg.enableWarmup = false;
+    cfg.enablePowerGridConduction = false;
+    PushPullStage pp;
+    pp.setup(cfg, kSampleRate);
+
+    for (int n = 0; n < 2000; ++n) pp.process(0.0, 450.0);
+    const double aRest = pp.alphaMagRest();
+    REQUIRE(aRest > 0.01);
+    INFO("rest share = " << aRest << ", tracked at rest = " << pp.alphaMagLast());
+    REQUIRE(std::abs(pp.alphaMagLast() - aRest) < 0.05 * aRest + 1.0e-3);
+
+    double aMin = 1.0;
+    for (int n = 0; n < 4800; ++n)
+    {
+        const double x = 30.0 * std::sin(2.0 * std::numbers::pi * 60.0
+                                       * (static_cast<double>(n) / kSampleRate));
+        pp.process(x, 450.0);
+        aMin = std::min(aMin, pp.alphaMagLast());
+    }
+    INFO("min tracked share under drive = " << aMin);
+    REQUIRE(aMin < 0.7 * aRest);
+}
+
 TEST_CASE("PushPullStage: ultralinear tap sits between triode and pentode",
           "[pushpull][ultralinear]")
 {

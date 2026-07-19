@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-19 18:35:56 ",
+  "generated_at": "2026-07-19 19:21:57 ",
   "passed": true,
   "rows": [
     {
@@ -45,9 +45,9 @@
     {
       "scenario": "Vocal Color (Creative)",
       "preset": "cv",
-      "low_level_harmonic_slope": 0.816714330569182,
-      "texture_recovery": 0.36841813371837967,
-      "micro_motion": 0.1770030760686356,
+      "low_level_harmonic_slope": 0.8170361053424754,
+      "texture_recovery": 0.36837506962762273,
+      "micro_motion": 0.17714686608818883,
       "passed": true
     },
     {
@@ -61,9 +61,9 @@
     {
       "scenario": "Vocal Consonant Recovery",
       "preset": "cv",
-      "low_level_harmonic_slope": 0.9692864476226117,
-      "texture_recovery": 0.3014468329190174,
-      "micro_motion": 0.1953425432136064,
+      "low_level_harmonic_slope": 0.970304042152557,
+      "texture_recovery": 0.30254017649690024,
+      "micro_motion": 0.19097990700216227,
       "passed": true
     },
     {

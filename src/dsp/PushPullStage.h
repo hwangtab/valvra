@@ -648,8 +648,25 @@ public:
         //    placed compression.  The tubes' internal stress (current,
         //    dissipation, PSU draw, tail shift) always carries the full
         //    magnetizing demand.
+        // α(t) tracking (docs/35 C3): the same current-divider share the
+        // rest formula uses, but from THIS SAMPLE's solved plate slopes
+        // (solveSide already applies the UL chain rule to rpInv).  At the
+        // rest point it equals alphaMagRest_ exactly; in class-AB cutoff
+        // the starved side's rpInv → 0 halves the share, so the iron's
+        // demand passes through as compression instead of being linearly
+        // de-embedded with a stale rest divider.
+        double alphaMag = alphaMagRest_;
+        if (config_.coupleOPTDifferential && magZDiff_ > 0.0)
+        {
+            const double aP = rpInvPosOut * magRTot_
+                            / (1.0 + rpInvPosOut * magZDiff_);
+            const double aN = rpInvNegOut * magRTot_
+                            / (1.0 + rpInvNegOut * magZDiff_);
+            alphaMag = std::clamp(0.5 * (aP + aN), 0.0, 1.0);
+        }
+        alphaMagLast_ = alphaMag;
         const double diff = (Ip_pos - Ip_neg)
-                          - warmupCurrent_ * alphaMagRest_ * iMagA_;
+                          - warmupCurrent_ * alphaMag * iMagA_;
         lastIp_ = Ip_pos + Ip_neg;  // sum used by PSU sag
 
         // Advance the dissipation envelope (uses the solved per-side
@@ -738,6 +755,11 @@ public:
     {
         return 1.0 / std::max(lastRpInvAvg_, 1.0e-6);
     }
+
+    /// Rest-point and live magnetizing de-embed shares (docs/35 C3 guards).
+    double alphaMagRest() const noexcept { return alphaMagRest_; }
+    double alphaMagLast() const noexcept { return alphaMagLast_; }
+
     /// Total blocking charge (max of the two sides) [V] — UI / tests.
     double blockingChargeVolts() const noexcept
     {
@@ -908,7 +930,10 @@ private:
             const double aN = std::max(0.0, dN.rpInv) * ul * rTot
                             / (1.0 + std::max(0.0, dN.rpInv) * ul * zDiff);
             alphaMagRest_ = std::clamp(0.5 * (aP + aN), 0.0, 1.0);
+            magRTot_  = rTot;
+            magZDiff_ = zDiff;
         }
+        alphaMagLast_ = alphaMagRest_;
 
         ipAcPosLast_ = 0.0;
         ipAcNegLast_ = 0.0;
@@ -1138,6 +1163,9 @@ private:
     // rest-point de-embed share (docs/34 §2.2).
     double iMagA_        { 0.0 };
     double alphaMagRest_ { 0.0 };
+    double alphaMagLast_ { 0.0 };     ///< Tracked α(t) (docs/35 C3)
+    double magRTot_      { 0.0 };     ///< rQ + DCR (α formula numerator R)
+    double magZDiff_     { 0.0 };     ///< 2rQ + DCR (α formula loop R)
     double lastRpInvAvg_ { 1.0e-3 };  ///< Pair avg ∂Ip/∂Vp (Zout, §3.9)
 
     // Power-grid blocking network state + setup constants (docs/34 §2.4).
