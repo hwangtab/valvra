@@ -327,6 +327,7 @@ private:
     static constexpr const char* kParamMcLock    = "mcLock";
     static constexpr const char* kParamMcDistribution = "mcDistribution";
     static constexpr const char* kParamMains     = "mains";
+    static constexpr const char* kParamCvBias    = "cvBias";
     static constexpr const char* kParamCvMode    = "cvMode";
     static constexpr const char* kParamNeuralBlend = "neuralBlend";
     static constexpr const char* kParamExpansionMode = "expansionMode";

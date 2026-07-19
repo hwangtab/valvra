@@ -714,6 +714,7 @@ ValvraProcessor::ValvraProcessor()
     params_.addParameterListener(kParamMcDistribution, this);
     params_.addParameterListener(kParamCvMode, this);
     params_.addParameterListener(kParamMains, this);
+    params_.addParameterListener(kParamCvBias, this);
     // M/S mode swap requires both chains to be re-seeded (shared seed in
     // Mid/Side mode vs XOR-salted in Stereo mode).
     params_.addParameterListener(kParamMSMode, this);
@@ -746,6 +747,7 @@ ValvraProcessor::~ValvraProcessor()
     params_.removeParameterListener(kParamMcDistribution, this);
     params_.removeParameterListener(kParamCvMode, this);
     params_.removeParameterListener(kParamMains, this);
+    params_.removeParameterListener(kParamCvBias, this);
     params_.removeParameterListener(kParamMSMode, this);
 
     for (const auto& s : kStageParams)
@@ -778,6 +780,7 @@ void ValvraProcessor::parameterChanged(const juce::String& paramID,
         || paramID == kParamMcDistribution
         || paramID == kParamCvMode
         || paramID == kParamMains
+        || paramID == kParamCvBias
         || paramID == kParamMSMode
         || paramID == kParamTargetProfile
         || paramID == kParamRealismAmount)
@@ -906,6 +909,14 @@ ValvraProcessor::createLayout()
             "Mains Frequency",
             StringArray { "60 Hz (US/JP)", "50 Hz (EU)" },
             0),
+        // CV-style BIAS: DC shift on the free suppressor grids [V].
+        // 0 = documented operating point; negative chokes the plate
+        // stream toward gnarl, positive opens it up (docs/35 C10).
+        std::make_unique<AudioParameterFloat>(
+            ParameterID { kParamCvBias, 1 },
+            "Bias (g3)",
+            NormalisableRange<float> { -2.0f, 1.5f, 0.01f },
+            0.0f),
         std::make_unique<AudioParameterFloat>(
             ParameterID { kParamNeuralBlend, 1 },
             "Neural Blend",
@@ -1330,6 +1341,10 @@ void ValvraProcessor::rebuildChain()
         const double mainsHz = eu ? 50.0 : 60.0;
         cfgL.mainsFrequencyHz = mainsHz;
         cfgR.mainsFrequencyHz = mainsHz;
+        const double g3Bias = static_cast<double>(
+            params_.getRawParameterValue(kParamCvBias)->load());
+        cfgL.suppressorBiasOffsetV = g3Bias;
+        cfgR.suppressorBiasOffsetV = g3Bias;
     }
 
     auto applyChainBuilderParams = [this](dsp::TubeAmpChainConfig& cfg)

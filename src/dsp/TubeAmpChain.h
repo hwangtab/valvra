@@ -177,6 +177,13 @@ struct TubeAmpChainConfig
     // wiring differences are physical, the line frequency is not.
     double mainsFrequencyHz { 60.0 };
 
+    /// Culture-Vulture-style BIAS knob (docs/35 C10): DC offset [V] added
+    /// to every free (non-cathode-tied) suppressor grid.  The real unit's
+    /// front-panel BIAS pot shifts the 6AS6 g3 DC — sweeping the transfer
+    /// from polite to broken — on top of the envelope-driven voicing.
+    /// 0 = the preset's documented operating point.
+    double suppressorBiasOffsetV { 0.0 };
+
     // Interstage coupling between stages i and i+1
     double interstageCc { 22.0e-9 };   // 22 nF
     double interstageRg { 1.0e6 };     // 1 MΩ → fc ≈ 7 Hz
@@ -1682,6 +1689,10 @@ private:
         // instance so 50/60 Hz is consistent across heater, ripple and the
         // processor's leakage hum (docs/34 §1.5).
         cfg.heaterFrequency = config_.mainsFrequencyHz;
+        // BIAS knob: direct DC shift on free suppressor grids (docs/35
+        // C10).  Applied before setup so the rest solve tracks the knob.
+        if (! cfg.suppressorTieToCathode && cfg.enablePentodeModel)
+            cfg.suppressorBiasVolts += config_.suppressorBiasOffsetV;
         // Every stage that feeds another stage sees that stage's grid-leak
         // resistor as part of its AC plate load (docs/34 §3.8).
         cfg.nextStageLoadR = (i < config_.numStages - 1)

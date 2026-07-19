@@ -1650,6 +1650,69 @@ TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
     for (double v : pVn) REQUIRE(std::isfinite(v));
 }
 
+TEST_CASE("TubeAmpChain: suppressor BIAS knob reshapes the CV transfer",
+          "[chain][cv][bias-knob]")
+{
+    // docs/35 C10: the real Culture Vulture's front-panel BIAS pot puts a
+    // DC offset on the 6AS6 suppressor grid.  The knob must (a) default
+    // to the documented voicing bit-exactly, and (b) move the harmonic
+    // mix substantially across its range.
+    auto render = [&](double biasOffset)
+    {
+        auto cfg = chain_presets::CultureVultureMode();
+        cfg.variationSeed = 1;
+        cfg.suppressorBiasOffsetV = biasOffset;
+        for (int i = 0; i < cfg.numStages; ++i)
+        {
+            cfg.stages[static_cast<std::size_t>(i)].enableShotNoise = false;
+            cfg.stages[static_cast<std::size_t>(i)].enableHeaterHum = false;
+        }
+        TubeAmpChain chain;
+        chain.setup(cfg, kSampleRate);
+        std::vector<double> y;
+        const int N = 24000, skip = 12000;
+        y.reserve(static_cast<std::size_t>(N - skip));
+        for (int n = 0; n < N; ++n)
+        {
+            const double s = chain.process(
+                0.4 * std::sin(2.0 * std::numbers::pi * 220.0
+                             * (static_cast<double>(n) / kSampleRate)));
+            if (n >= skip) y.push_back(s);
+        }
+        return y;
+    };
+    auto bin = [&](const std::vector<double>& y, double freq) {
+        double re = 0.0, im = 0.0;
+        const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
+        for (std::size_t i = 0; i < y.size(); ++i)
+        {
+            re += y[i] * std::cos(w * static_cast<double>(i));
+            im += y[i] * std::sin(w * static_cast<double>(i));
+        }
+        return std::sqrt(re * re + im * im) / static_cast<double>(y.size());
+    };
+
+    const auto y0 = render(0.0);
+    const auto yNeg = render(-1.5);
+    const auto yPos = render(1.0);
+    const double h2_0 = bin(y0, 440.0) / std::max(bin(y0, 220.0), 1e-12);
+    const double h2N = bin(yNeg, 440.0) / std::max(bin(yNeg, 220.0), 1e-12);
+    const double h2P = bin(yPos, 440.0) / std::max(bin(yPos, 220.0), 1e-12);
+    INFO("H2/H1 @ bias -1.5/0/+1.0 = " << h2N << " / " << h2_0 << " / " << h2P);
+    // The knob must actually do something at both extremes.
+    REQUIRE(std::abs(20.0 * std::log10(std::max(h2N, 1e-9)
+                                       / std::max(h2_0, 1e-9))) > 1.0);
+    REQUIRE(std::abs(20.0 * std::log10(std::max(h2P, 1e-9)
+                                       / std::max(h2_0, 1e-9))) > 1.0);
+    // And every setting must keep the chain finite and alive.
+    for (const auto* v : { &y0, &yNeg, &yPos })
+    {
+        double rms = 0.0;
+        for (double x : *v) { REQUIRE(std::isfinite(x)); rms += x * x; }
+        REQUIRE(std::sqrt(rms / static_cast<double>(v->size())) > 1.0e-4);
+    }
+}
+
 TEST_CASE("TubeAmpChain: pentode rest anchor matches the runtime screen equilibrium",
           "[chain][cv][defect-guard]")
 {
