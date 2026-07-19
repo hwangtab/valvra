@@ -78,6 +78,20 @@ public:
         Vs_ = Vk_initial;   // soakage starts fully settled, not at zero
     }
 
+    // Two-state prime for slow-state carry (docs/35 C7): a running unit's
+    // soakage network usually sits AWAY from the main cap (that separation
+    // IS the dielectric-absorption "bloom" in progress) — collapsing it to
+    // the single-value prime flattened the bloom on every rebuild carry.
+    void primeTo(double Vk_initial, double Vs_initial) noexcept
+    {
+        Vk_ = Vk_initial;
+        Vs_ = Vs_initial;
+    }
+
+    // Raw states, for the carry rebase and its guards.
+    double mainCapVolts() const noexcept { return Vk_; }
+    double soakageVolts() const noexcept { return Vs_; }
+
     // Scale Ck for per-instance Monte Carlo variation (±20% for electrolytics,
     // docs/06 §2.2). Applied multiplicatively to the default Ck.
     void setCkScale(double scale) noexcept

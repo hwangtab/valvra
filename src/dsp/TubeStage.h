@@ -874,8 +874,12 @@ public:
 
         warmupCurrent_ = std::clamp(fin(o.warmupCurrent_, 1.0), 0.5, 1.0);
         ipAvgLong_ = Ip_rest_ + fin(o.ipAvgLong_ - o.Ip_rest_, 0.0);
-        bounce_.primeTo(Vk_rest_
-            + fin(o.bounce_.currentBias() - o.Vk_rest_, 0.0));
+        // Rebase BOTH bounce states on the new rest (docs/35 C7): the
+        // Vs−Vk separation is the in-progress DA bloom and must survive
+        // the carry, not be flattened to a settled single value.
+        bounce_.primeTo(
+            Vk_rest_ + fin(o.bounce_.mainCapVolts() - o.Vk_rest_, 0.0),
+            Vk_rest_ + fin(o.bounce_.soakageVolts() - o.Vk_rest_, 0.0));
 
         const double oF = o.gridChargeRestV_ * (25.0 / 43.0);
         const double oS = o.gridChargeRestV_ * (18.0 / 43.0);
@@ -1821,6 +1825,8 @@ public:
     double lastScreenVoltage() const noexcept { return screenNodeV_; }
     double restingPlateCurrent() const noexcept { return Ip_rest_; }
     double restingPlateVoltage() const noexcept { return Vp_rest_; }
+    /// Cathode bounce network (read-only) — carry/soakage guards (docs/35 C7).
+    const CathodeBounce& cathodeBounce() const noexcept { return bounce_; }
     /// Live screen-grid node voltage (pentode path; supply volts otherwise).
     /// Exposed for the rest-vs-runtime consistency guards (docs/35 §S2 D-A).
     double screenNodeVoltage() const noexcept { return screenNodeV_; }

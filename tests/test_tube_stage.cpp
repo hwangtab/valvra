@@ -245,6 +245,42 @@ TEST_CASE("TubeStage: Culture Vulture T/P1/P2 core voicings are distinct",
     REQUIRE(std::abs(p2 - p1) > 0.01);
 }
 
+TEST_CASE("TubeStage: slow-state carry preserves the soakage bloom",
+          "[TubeStage][carry][soakage]")
+{
+    // docs/35 C7: the Vs != Vk separation of the cathode bypass DA
+    // network is the "bloom" in progress — the old single-value prime
+    // flattened it on every rebuild carry.
+    auto cfg = chain_presets::V72Preamp().stages[0];
+    cfg.enableWarmup = false;
+    cfg.enableShotNoise = false;
+    cfg.enableHeaterHum = false;
+    TubeStage a;
+    a.setup(cfg, kSampleRate);
+
+    // Loud passage, then a short gap: the fast cap recovers toward rest
+    // while the slow soakage network lags — a real separation.
+    for (int i = 0; i < 14400; ++i)
+        a.process(3.0 * std::sin(2.0 * std::numbers::pi * 220.0
+                               * (static_cast<double>(i) / kSampleRate)),
+                  cfg.Vp_nominal);
+    for (int i = 0; i < 2400; ++i)
+        a.process(0.0, cfg.Vp_nominal);
+
+    const double sepA = a.cathodeBounce().soakageVolts()
+                      - a.cathodeBounce().mainCapVolts();
+    INFO("bloom separation before carry = " << sepA << " V");
+    REQUIRE(std::abs(sepA) > 1.0e-4);
+
+    TubeStage b;
+    b.setup(cfg, kSampleRate);
+    b.carrySlowStateFrom(a);
+    const double sepB = b.cathodeBounce().soakageVolts()
+                      - b.cathodeBounce().mainCapVolts();
+    INFO("bloom separation after carry = " << sepB);
+    REQUIRE(sepB == Catch::Approx(sepA).margin(1.0e-9));
+}
+
 TEST_CASE("TubeStage: pentode next-stage Rg reshapes the load line, level preserved",
           "[TubeStage][pentode][rg-load]")
 {
