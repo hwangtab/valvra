@@ -1650,6 +1650,67 @@ TEST_CASE("TubeAmpChain: voltage-native interface is calibration-identical "
     for (double v : pVn) REQUIRE(std::isfinite(v));
 }
 
+TEST_CASE("TubeAmpChain: console realism feedback rides the real NFB loop",
+          "[chain][nfb][c9]")
+{
+    // docs/35 C9 (option C): the console profile's feedback budget now
+    // adds REAL loop gain instead of the envelope subtraction.  The
+    // physical claim of negative feedback: linear-region distortion
+    // drops by ~(1+T) while the level calibration holds via the loop's
+    // (1+T) makeup.  Compare the Marshall chain at baseline T=0.6
+    // against the converted full-realism T=2.6.
+    auto render = [&](double extraT, double envelopeAmount)
+    {
+        auto cfg = chain_presets::MarshallMode();
+        cfg.variationSeed = 1;
+        cfg.realismAmount = 1.0;
+        cfg.feedbackAmount = envelopeAmount;
+        cfg.nfbLoopGain = std::min(3.0, cfg.nfbLoopGain + extraT);
+        for (int i = 0; i < cfg.numStages; ++i)
+        {
+            cfg.stages[static_cast<std::size_t>(i)].enableShotNoise = false;
+            cfg.stages[static_cast<std::size_t>(i)].enableHeaterHum = false;
+        }
+        TubeAmpChain chain;
+        chain.setup(cfg, kSampleRate);
+        std::vector<double> y;
+        const int N = 24000, skip = 12000;
+        y.reserve(static_cast<std::size_t>(N - skip));
+        for (int n = 0; n < N; ++n)
+        {
+            const double s = chain.process(
+                0.15 * std::sin(2.0 * std::numbers::pi * 220.0
+                              * (static_cast<double>(n) / kSampleRate)));
+            if (n >= skip) y.push_back(s);
+        }
+        return y;
+    };
+    auto bin = [&](const std::vector<double>& y, double freq) {
+        double re = 0.0, im = 0.0;
+        const double w = 2.0 * std::numbers::pi * freq / kSampleRate;
+        for (std::size_t i = 0; i < y.size(); ++i)
+        {
+            re += y[i] * std::cos(w * static_cast<double>(i));
+            im += y[i] * std::sin(w * static_cast<double>(i));
+        }
+        return std::sqrt(re * re + im * im) / static_cast<double>(y.size());
+    };
+
+    const auto base = render(0.0, 0.10);   // legacy: envelope layer active
+    const auto conv = render(2.0, 0.0);    // converted: real loop, no envelope
+    const double h1B = bin(base, 220.0), h1C = bin(conv, 220.0);
+    const double h3B = bin(base, 660.0) / std::max(h1B, 1e-12);
+    const double h3C = bin(conv, 660.0) / std::max(h1C, 1e-12);
+    INFO("H1 " << h1B << " -> " << h1C << ", H3/H1 " << h3B << " -> " << h3C);
+    // Moderate drive: the loop must measurably linearize (H3 down ≥ 1 dB).
+    // The fundamental RISES here — feedback restores the compression the
+    // envelope layer used to subtract — so no tight level bound at this
+    // drive; the static trims are the refit gate's business.
+    REQUIRE(h3C < 0.9 * h3B);
+    REQUIRE(h1C > h1B);            // linearization, not attenuation
+    REQUIRE(h1C < 2.0 * h1B);      // sanity: no runaway
+}
+
 TEST_CASE("TubeAmpChain: suppressor BIAS knob reshapes the CV transfer",
           "[chain][cv][bias-knob]")
 {

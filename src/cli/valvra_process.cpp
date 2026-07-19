@@ -615,6 +615,16 @@ void applyRealism(TubeAmpChainConfig& cfg, const CliOptions& o) noexcept
 
     cfg.realismAmount = realism;
     cfg.feedbackAmount = realism * p.feedbackAmount;
+    // Console/Marshall reference has a real global loop — route the
+    // realism feedback budget into it (docs/35 C9 option C), mirroring
+    // the plugin's profile-2 conversion.
+    if (o.preset == "marshall")
+    {
+        cfg.nfbLoopGain = std::min(3.0, cfg.nfbLoopGain
+            + realism * p.feedbackAmount
+              * TubeAmpChainConfig::kEnvelopeToLoopGainC9);
+        cfg.feedbackAmount = 0.0;
+    }
     cfg.transformerLoading = realism * p.transformerLoading;
     cfg.interstageDAAmount = realism * p.interstageDA;
     cfg.interstageDATau = p.interstageDATau;

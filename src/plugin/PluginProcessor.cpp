@@ -1444,6 +1444,17 @@ void ValvraProcessor::rebuildChain()
         cfg.realismAmount = realism;
         cfg.feedbackAmount =
             static_cast<double>(realism * realismProfile.feedbackAmount);
+        // Console references run a REAL global loop (docs/35 C9 option
+        // C): convert the profile's feedback budget into loop gain on
+        // top of the preset's baseline, and silence the envelope
+        // heuristic.  No-NFB references keep the envelope voicing.
+        if (profile == 2)
+        {
+            cfg.nfbLoopGain = std::min(3.0, cfg.nfbLoopGain
+                + static_cast<double>(realism * realismProfile.feedbackAmount)
+                  * dsp::TubeAmpChainConfig::kEnvelopeToLoopGainC9);
+            cfg.feedbackAmount = 0.0;
+        }
         cfg.transformerLoading =
             static_cast<double>(realism * realismProfile.transformerLoading);
         cfg.interstageDAAmount =

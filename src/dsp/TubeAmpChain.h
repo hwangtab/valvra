@@ -226,6 +226,16 @@ struct TubeAmpChainConfig
     // voicings such as HiFi 300B, V72, RNDI, Culture Vulture).
     double nfbLoopGain { 0.0 };
 
+    /// docs/35 C9 (option C): profiles whose REFERENCE HARDWARE runs a
+    /// global negative-feedback loop (console-class output amps) route
+    /// their realism feedback budget into the REAL per-sample loop above
+    /// instead of the envelope heuristic.  The envelope path stays for
+    /// no-NFB references (V72/300B/RNDI/CV), whose voicing was
+    /// deliberately built on it.  Mapping: an envelope amount of 0.10 at
+    /// full realism adds T = 2.0 (with the Marshall preset's baseline
+    /// 0.6 → total 2.6 ≈ 11 dB of feedback, console-grade).
+    static constexpr double kEnvelopeToLoopGainC9 = 20.0;
+
     // Input/output transformers — full Jiles-Atherton model
     bool                    useInputTransformer  { true };
     TransformerStageConfig  inputTrafoConfig     { transformer_presets::Marinair() };
