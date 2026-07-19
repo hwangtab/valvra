@@ -39,6 +39,40 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+  # Cross-platform DSP gates (docs/35 D4).  Non-blocking for now
+  # (continue-on-error): the suites are being hardened against platform
+  # floating-point edge cases — flip to blocking once two consecutive
+  # green runs exist per OS.
+  cross-platform-dsp:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: DSP ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake (DSP + tests only)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DVALVRA_BUILD_TESTS=ON
+          -DVALVRA_BUILD_PLUGIN=OFF
+          -DVALVRA_BUILD_CLI=OFF
+          -DVALVRA_ENABLE_FIT_PIPELINE_TEST=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
   # Full plugin build + the complete 200+ test suite (including the
   # plugin stress tests that caught the feedthrough limit-cycle, the
   # flux-loop instability and the carry-over steps — docs/35 §A2: the
