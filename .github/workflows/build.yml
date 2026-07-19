@@ -15,12 +15,6 @@ jobs:
     runs-on: macos-14
     name: macOS-arm64
 
-    # Note: Linux + Windows builds compile fine but a handful of tests
-    # exercise platform-sensitive floating-point edge cases (NaN handling,
-    # exact spectral bin levels in the heater-hum test).  Those will be
-    # tightened in a follow-up; for now CI gates the primary release
-    # platform (macOS, where Logic / Reaper / Ableton users live).
-
     steps:
       - uses: actions/checkout@v4
 
