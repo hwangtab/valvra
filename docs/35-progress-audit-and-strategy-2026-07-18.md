@@ -79,7 +79,7 @@
 - **D1.** ~~`variationCache_`(std::vector)가 오디오 스레드에서 할당~~ → **✅ 해결(2026-07-19)**: 고정 `std::array<ComponentVariation, kMaxStages>` + count 전환. 체인 오브젝트 그래프 전체가 힙 멤버 제로가 되어 값 복사(carry 스냅샷)까지 무할당 — `static_assert(is_trivially_copyable_v<TubeAmpChain>)` 컴파일 타임 가드로 고정(34KB 평탄 객체, 복사=memcpy).
 - **D2.** ~~CV 4×(~106%)·V72 8× 1코어 잔여 초과~~ → **✅ 부분 해결(2026-07-19, docs/36)**: 트라이오드 pow 짝 축약(s^(γ−1)=s^γ/s, 3사이트) + 펜토드 shared-log(pow 2회→log1+exp2). best-of-3: **CV 94.5%로 1코어 진입**, Marshall −12%, RNDI −13%, V72 8×는 111.5%로 잔여(8× 폴리페이즈 지배 — 하프밴드 캐스케이드가 다음 후보).
 - **D3.** ~~볼트-네이티브 레거시 폴백 제거 대기~~ → **✅ 해결(2026-07-19)**: `voltageNativeInterface` 플래그·조건 분기 제거, 볼트-네이티브 단일 경로화(트라포 경계 정규화는 유지). 이행기 A/B 테스트를 단일 경로 절대 앵커(H1 0.968 ±1.5dB + 펌핑 생존성)로 재작성. 기본값이 원래 true라 동작 무변경.
-- **D4.** CI 주석의 Linux/Windows 부동소수 이슈(NaN 처리·험 스펙트럼 빈) 미해결 — 크로스 플랫폼 게이트 부재.
+- **D4.** ~~Linux/Windows 크로스 플랫폼 게이트 부재~~ → **✅ 해결(2026-07-19)**: ubuntu/windows DSP 매트릭스 잡 신설, 4회 수확-견고화 사이클로 그린 달성 후 blocking 전환. 실체는 "부동소수 이슈"가 아니라: ① C++20 지정 초기화자 순서 위반 1건(GCC/MSVC 강제, `-Werror=reorder-init-list`로 macOS 조기검출화), ② **Windows UTF-8 테스트명 필터 붕괴**(CTest 커맨드라인 ACP 인코딩 — 비ASCII 이름 16건 ASCII 정규화로 근본 해결), ③ glibc libm 드리프트 3건(HiFi 상한 1.2, NFB 추정 광대역, 골든은 macOS 기준 게이트로 명시). 골든 지문의 크로스 플랫폼 비트 패리티는 명시적 비목표.
 
 ---
 

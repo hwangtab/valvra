@@ -39,10 +39,10 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
-  # Cross-platform DSP gates (docs/35 D4).  Non-blocking for now
-  # (continue-on-error): the suites are being hardened against platform
-  # floating-point edge cases — flip to blocking once two consecutive
-  # green runs exist per OS.
+  # Cross-platform DSP gates (docs/35 D4) — BLOCKING since run
+  # 4 (d7709df): the harvest fixed a designator-order build error, the
+  # Windows UTF-8 test-name filter mismatch, and three glibc libm-drift
+  # tolerances; golden fingerprints stay a macOS-reference-only gate.
   cross-platform-dsp:
     if: github.event_name != 'schedule'
     strategy:
@@ -51,7 +51,6 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: DSP ${{ matrix.os }}
-    continue-on-error: true
     timeout-minutes: 45
 
     steps:
