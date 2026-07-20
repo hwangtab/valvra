@@ -1075,19 +1075,34 @@ public:
         // so the 3 s render cost is irrelevant.
         const int kSettle = static_cast<int>(2.5 * sampleRate_);
         const int kMeas   = static_cast<int>(0.5 * sampleRate_);
-        double inSq = 0.0, outSq = 0.0;
+        // Single-bin quadrature at the probe frequency, NOT a broadband
+        // RMS ratio: with a push-pull power section the PSU ripple that
+        // reaches the output dwarfs a 1 mV probe's response, and the RMS
+        // form read the ripple as "gain" (2–4× over on Marshall — the
+        // origin of the docs/35 C9 "estimate is 1.4× high" seam, which
+        // was in fact the PROBE reading high, not the estimate).
+        double re = 0.0, im = 0.0;
+        constexpr double kAmp = 1.0e-3;
         for (int n = 0; n < kSettle + kMeas; ++n)
         {
-            const double x = 1.0e-3 * std::sin(w * static_cast<double>(n));
+            const double ph = w * static_cast<double>(n);
+            const double x = kAmp * std::sin(ph);
             const double y = process(x);
-            if (n >= kSettle) { inSq += x * x; outSq += y * y; }
+            if (n >= kSettle)
+            {
+                re += y * std::sin(ph);
+                im += y * std::cos(ph);
+            }
         }
 
         rerollCrossfadeActive_ = savedReroll;
         externalPSUMode_ = savedExtPSU;
         nfbBeta_ = savedBeta;
         nfbMakeup_ = savedMakeup;
-        return (inSq > 1.0e-20) ? std::sqrt(outSq / inSq) : 1.0;
+        const double outAmp = 2.0
+            * std::sqrt(re * re + im * im)
+            / std::max(1, kMeas);
+        return outAmp / kAmp;
     }
 
     void reset(bool coldStart = true)
@@ -1668,6 +1683,9 @@ public:
     /// Read-only view of the output transformer — for the OPT deep-
     /// saturation guards (docs/35 §S2 D-B).
     const TransformerStage& outputTransformer() const noexcept { return outputTrafo_; }
+    /// Read-only view of the push-pull stage — forward-gain calibration
+    /// diagnostics (docs/35 C9 β seam).
+    const PushPullStage& pushPullStage() const noexcept { return pushPull_; }
     int numStages() const noexcept { return config_.numStages; }
 
     /// Line frequency this instance's mains-derived textures (heater hum,

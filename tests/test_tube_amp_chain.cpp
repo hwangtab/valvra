@@ -1458,12 +1458,12 @@ TEST_CASE("TubeAmpChain: analytic NFB forward-gain estimate tracks the "
     REQUIRE(std::isfinite(aEst));
     REQUIRE(aEst > 0.0);
     REQUIRE(aMeas > 0.0);
-    // Wide band: the analytic estimate is a documented seam (~1.4x high
-    // vs probe on macOS, docs/35 C9), and platform libm drift moves the
-    // probed A further (0.34 ratio observed on glibc).  This guards
-    // order-of-magnitude sanity until the beta refinement lands.
-    REQUIRE(aEst / aMeas > 0.25);
-    REQUIRE(aEst / aMeas < 4.0);
+    // The probe is a single-bin quadrature at 1 kHz (a broadband RMS
+    // ratio read PSU ripple as "gain" and created the now-retired
+    // "estimate is 1.4x high" seam).  Residual spread: stage models
+    // ~1.05, PP ~1.2 (warm-up still settling during the probe window).
+    REQUIRE(aEst / aMeas > 0.6);
+    REQUIRE(aEst / aMeas < 1.7);
 }
 
 TEST_CASE("TransformerStage: distortion follows the drive source impedance",
