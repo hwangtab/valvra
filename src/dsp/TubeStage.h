@@ -393,6 +393,10 @@ public:
         // phase increment so the inner loop does one add + one branch.
         heaterPhaseInc_ =
             2.0 * M_PI * cfg.heaterFrequency / sampleRate;
+        humRotC_ = std::cos(heaterPhaseInc_);
+        humRotS_ = std::sin(heaterPhaseInc_);
+        humCos_  = std::cos(heaterPhase_);
+        humSin_  = std::sin(heaterPhase_);
 
         // Thermal-drift envelope coefficient (seconds-long τ, very close
         // to 1 at typical sample rates).
@@ -889,6 +893,8 @@ public:
             + fin(o.gridChargeSlowV_ - oS, 0.0));
 
         heaterPhase_ = fin(o.heaterPhase_, 0.0);
+        humCos_ = std::cos(heaterPhase_);
+        humSin_ = std::sin(heaterPhase_);
         if (o.shotRng_ != 0) shotRng_ = o.shotRng_;
         pinkB0_ = fin(o.pinkB0_, 0.0);
         pinkB1_ = fin(o.pinkB1_, 0.0);
@@ -943,6 +949,8 @@ public:
             gridChargeFastV_ = gridChargeRestV_ * (25.0 / 43.0);
             gridChargeSlowV_ = gridChargeRestV_ * (18.0 / 43.0);
             heaterPhase_   = 0.0;
+            humCos_        = 1.0;
+            humSin_        = 0.0;
             ipAvgLong_     = Ip_rest_;
             slewState_     = 0.0;
             micX1_ = micX2_ = micY1_ = micY2_ = 0.0;
@@ -1097,16 +1105,33 @@ public:
             heaterPhase_ += heaterPhaseInc_;
             if (heaterPhase_ >= 2.0 * M_PI)
                 heaterPhase_ -= 2.0 * M_PI;
+            // Advance the quadrature pair by one rotation and keep it on
+            // the unit circle with a first-order renormalisation (the
+            // rotation is norm-preserving to rounding; the cheap 3−n²/2
+            // correction pins the residual drift without a sqrt).
+            {
+                const double c = humCos_ * humRotC_ - humSin_ * humRotS_;
+                const double sN = humSin_ * humRotC_ + humCos_ * humRotS_;
+                const double renorm =
+                    1.5 - 0.5 * (c * c + sN * sN);
+                humCos_ = c * renorm;
+                humSin_ = sN * renorm;
+            }
 
             // Line fundamental from heater-cathode leakage plus a 2nd
             // harmonic: heating power goes as V², so the emission ripple
             // rides at 2×line — real hum spectra always show both.
+            // sin(2φ+0.6) expands to double-angle products of the pair —
+            // no libm calls in the loop.
+            constexpr double kCos06 = 0.82533561490967829;
+            constexpr double kSin06 = 0.56464247339503535;
+            const double sin2 = 2.0 * humSin_ * humCos_;
+            const double cos2 = humCos_ * humCos_ - humSin_ * humSin_;
             const double levelMod =
                 1.0 + config_.heaterModDepth * std::abs(vgSignal);
             const double hum =
                 config_.heaterHumAmplitude * levelMod
-                * (std::sin(heaterPhase_)
-                   + 0.35 * std::sin(2.0 * heaterPhase_ + 0.6));
+                * (humSin_ + 0.35 * (sin2 * kCos06 + cos2 * kSin06));
             Vg += hum;
         }
 
@@ -2370,6 +2395,15 @@ private:
     double gridChargeSlowV_ { 0.0 }; ///< Slow recovery branch [V]
     double gridChargeRestV_ { 0.0 }; ///< Standing grid-leak equilibrium [V]
     double heaterPhase_    { 0.0 };
+    // Quadrature oscillator mirror of heaterPhase_ (docs/35 D2 follow-up):
+    // (humCos_, humSin_) = (cos φ, sin φ) advanced by one complex rotation
+    // per sample — replaces two std::sin calls per stage per sample (the
+    // hum was 16% of the whole V72 chain at 8× OS).  heaterPhase_ stays
+    // the master state for carry/reseed; the pair re-derives from it.
+    double humCos_         { 1.0 };
+    double humSin_         { 0.0 };
+    double humRotC_        { 1.0 };
+    double humRotS_        { 0.0 };
     double heaterPhaseInc_ { 0.0 };
     double thermalAlpha_   { 0.0 };  ///< IIR coeff for long-τ envelope
     double ipAvgLong_      { 0.0 };  ///< Slow mean-|Ip| envelope [A]
@@ -2426,7 +2460,12 @@ public:
     /// each stage starts at a different point in the 60 Hz cycle, and L
     /// vs R channels have uncorrelated hum — imitating the real world
     /// where no two tubes are wired identically to the heater winding.
-    void setHeaterPhase(double phase) noexcept { heaterPhase_ = phase; }
+    void setHeaterPhase(double phase) noexcept
+    {
+        heaterPhase_ = phase;
+        humCos_ = std::cos(phase);
+        humSin_ = std::sin(phase);
+    }
 
 private:
 };
